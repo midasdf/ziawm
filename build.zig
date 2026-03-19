@@ -90,6 +90,13 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Command module (pure Zig, depends on criteria)
+    const command_mod = b.createModule(.{
+        .root_source_file = b.path("src/command.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Config module (pure Zig, depends on criteria which depends on tree)
     const config_mod = b.createModule(.{
         .root_source_file = b.path("src/config.zig"),
@@ -160,6 +167,20 @@ pub fn build(b: *std.Build) void {
     });
     const run_config_tests = b.addRunArtifact(config_tests);
     test_step.dependOn(&run_config_tests.step);
+
+    // command tests
+    const command_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_command.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "command", .module = command_mod },
+            },
+        }),
+    });
+    const run_command_tests = b.addRunArtifact(command_tests);
+    test_step.dependOn(&run_command_tests.step);
 
     // ipc tests
     const ipc_tests = b.addTest(.{
