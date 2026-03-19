@@ -1,4 +1,4 @@
-const tree = @import("tree");
+const tree = @import("tree.zig");
 
 const TAB_BAR_HEIGHT: u32 = 16;
 const MAX_TILING_CHILDREN: usize = 64;

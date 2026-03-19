@@ -1,5 +1,5 @@
 const std = @import("std");
-const tree = @import("tree");
+const tree = @import("tree.zig");
 
 pub const Criteria = struct {
     class: ?[]const u8 = null,

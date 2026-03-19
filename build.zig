@@ -71,22 +71,25 @@ pub fn build(b: *std.Build) void {
     });
 
     // Shared layout module (pure Zig, no xcb dependency)
+    // Note: layout.zig uses @import("tree.zig") file-based import.
+    // For tests, we map "tree.zig" to tree_mod so the same type identity is used.
     const layout_mod = b.createModule(.{
         .root_source_file = b.path("src/layout.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "tree", .module = tree_mod },
+            .{ .name = "tree.zig", .module = tree_mod },
         },
     });
 
     // Criteria module (pure Zig, depends on tree)
+    // Same approach: map "tree.zig" to tree_mod for type identity.
     const criteria_mod = b.createModule(.{
         .root_source_file = b.path("src/criteria.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "tree", .module = tree_mod },
+            .{ .name = "tree.zig", .module = tree_mod },
         },
     });
 

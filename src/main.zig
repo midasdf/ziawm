@@ -7,25 +7,35 @@ const output = @import("output.zig");
 const event = @import("event.zig");
 const render = @import("render.zig");
 const ipc = @import("ipc.zig");
+const config_mod = @import("config.zig");
+const command_mod = @import("command.zig");
 const linux = std.os.linux;
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
 const VERSION = "0.1.0";
 
-// Default border colors (can be overridden by config later)
-const BORDER_FOCUS_COLOR: u32 = 0x4c7899;
-const BORDER_UNFOCUS_COLOR: u32 = 0x333333;
+// Default border colors (can be overridden by config)
+const DEFAULT_BORDER_FOCUS_COLOR: u32 = 0x4c7899;
+const DEFAULT_BORDER_UNFOCUS_COLOR: u32 = 0x333333;
 
 // IPC constants
 const IPC_LISTEN_FD_TAG: i32 = -100; // sentinel for epoll data.fd
 const MAX_IPC_CLIENTS: usize = 16;
 
-fn handleIpcMessage(client_fd: std.posix.fd_t, msg_type: u32, _: []const u8) void {
+fn handleIpcMessage(ctx: *event.EventContext, client_fd: std.posix.fd_t, msg_type: u32, payload: []const u8) void {
     const response: []const u8 = switch (msg_type) {
         @intFromEnum(ipc.MessageType.get_version) =>
             "{\"human_readable\":\"ziawm " ++ VERSION ++ "\",\"loaded_config_file_name\":\"\",\"minor\":1,\"major\":0,\"patch\":0}",
-        @intFromEnum(ipc.MessageType.run_command) => "[{\"success\":true}]",
+        @intFromEnum(ipc.MessageType.run_command) => blk: {
+            // Execute the command
+            if (payload.len > 0) {
+                if (command_mod.parse(payload)) |cmd| {
+                    event.executeCommand(ctx, cmd);
+                }
+            }
+            break :blk "[{\"success\":true}]";
+        },
         @intFromEnum(ipc.MessageType.get_workspaces) => "[]",
         @intFromEnum(ipc.MessageType.get_outputs) => "[]",
         @intFromEnum(ipc.MessageType.get_tree) => "{}",
@@ -39,6 +49,59 @@ fn handleIpcMessage(client_fd: std.posix.fd_t, msg_type: u32, _: []const u8) voi
     };
 
     ipc.writeResponse(client_fd, msg_type, response) catch {};
+}
+
+/// Try to load config from standard paths. Returns null if no config found.
+fn loadConfig(allocator: std.mem.Allocator) ?config_mod.Config {
+    // Search paths in order
+    const home = std.posix.getenv("HOME") orelse "";
+    const xdg_config = std.posix.getenv("XDG_CONFIG_HOME");
+
+    var path_buf: [512]u8 = undefined;
+
+    // 1. XDG_CONFIG_HOME/ziawm/config
+    if (xdg_config) |xdg| {
+        const len = (std.fmt.bufPrint(&path_buf, "{s}/ziawm/config", .{xdg}) catch "").len;
+        if (len > 0) {
+            if (readConfigFile(allocator, path_buf[0..len])) |cfg| return cfg;
+        }
+    }
+
+    // 2. ~/.config/ziawm/config
+    {
+        const len = (std.fmt.bufPrint(&path_buf, "{s}/.config/ziawm/config", .{home}) catch "").len;
+        if (len > 0) {
+            if (readConfigFile(allocator, path_buf[0..len])) |cfg| return cfg;
+        }
+    }
+
+    // 3. ~/.ziawm/config
+    {
+        const len = (std.fmt.bufPrint(&path_buf, "{s}/.ziawm/config", .{home}) catch "").len;
+        if (len > 0) {
+            if (readConfigFile(allocator, path_buf[0..len])) |cfg| return cfg;
+        }
+    }
+
+    // 4. /etc/ziawm/config
+    if (readConfigFile(allocator, "/etc/ziawm/config")) |cfg| return cfg;
+
+    return null;
+}
+
+fn readConfigFile(allocator: std.mem.Allocator, path: []const u8) ?config_mod.Config {
+    const file = std.fs.cwd().openFile(path, .{}) catch return null;
+    defer file.close();
+    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch return null;
+    defer allocator.free(content);
+    return config_mod.Config.parse(allocator, content) catch null;
+}
+
+/// Parse a hex color string like "#4c7899" to a u32.
+fn parseColor(color_str: []const u8) u32 {
+    if (color_str.len == 0) return 0;
+    const s = if (color_str[0] == '#') color_str[1..] else color_str;
+    return std.fmt.parseInt(u32, s, 16) catch 0;
 }
 
 pub fn main() !void {
@@ -153,7 +216,23 @@ pub fn main() !void {
 
     _ = xcb.flush(conn);
 
-    // 7b. Setup IPC socket
+    // 7a. Load config
+    var config = loadConfig(allocator);
+    defer if (config) |*cfg| cfg.deinit();
+
+    // Determine colors from config
+    var border_focus_color: u32 = DEFAULT_BORDER_FOCUS_COLOR;
+    var border_unfocus_color: u32 = DEFAULT_BORDER_UNFOCUS_COLOR;
+    if (config) |cfg| {
+        border_focus_color = parseColor(cfg.focused_border);
+        border_unfocus_color = parseColor(cfg.unfocused_border);
+    }
+
+    // 7b. Allocate key symbols
+    const key_symbols = xcb.keySymbolsAlloc(conn);
+    defer if (key_symbols) |syms| xcb.keySymbolsFree(syms);
+
+    // 7c. Setup IPC socket
     var sock_path_buf: [256]u8 = undefined;
     const sock_path = ipc.getDefaultSocketPath(&sock_path_buf);
 
@@ -230,7 +309,7 @@ pub fn main() !void {
 
     // TODO: Add signalfd to epoll (Task 19)
 
-    // 9. Event loop
+    // 9. Event context
     var running: bool = true;
     var ctx = event.EventContext{
         .conn = conn,
@@ -240,9 +319,28 @@ pub fn main() !void {
         .allocator = allocator,
         .running = &running,
         .current_mode = "default",
-        .focus_follows_mouse = true,
+        .focus_follows_mouse = if (config) |cfg| cfg.focus_follows_mouse else true,
+        .config = if (config) |*cfg| cfg else null,
+        .key_symbols = key_symbols,
+        .border_focus_color = border_focus_color,
+        .border_unfocus_color = border_unfocus_color,
     };
 
+    // 10. Grab keys from config
+    if (config) |*cfg| {
+        event.grabKeys(&ctx, cfg);
+    }
+
+    // 11. Run exec commands from config
+    if (config) |cfg| {
+        for (cfg.exec_cmds.items) |exec_cmd| {
+            if (command_mod.parse(std.fmt.allocPrint(allocator, "exec {s}", .{exec_cmd}) catch continue)) |cmd| {
+                event.executeCommand(&ctx, cmd);
+            }
+        }
+    }
+
+    // 12. Event loop
     var events: [16]linux.epoll_event = undefined;
 
     while (running) {
@@ -297,7 +395,7 @@ pub fn main() !void {
                     if (slot.* == ev.data.fd) {
                         var msg_buf: [4096]u8 = undefined;
                         if (ipc.readMessage(ev.data.fd, &msg_buf)) |msg| {
-                            handleIpcMessage(ev.data.fd, msg.msg_type, msg.payload);
+                            handleIpcMessage(&ctx, ev.data.fd, msg.msg_type, msg.payload);
                         } else {
                             // Client disconnected or error
                             _ = linux.epoll_ctl(@intCast(epoll_fd), linux.EPOLL.CTL_DEL, @intCast(ev.data.fd), null);
@@ -310,9 +408,6 @@ pub fn main() !void {
             }
             // TODO: handle signalfd (Task 19)
         }
-
-        // Re-render after processing events
-        render.applyTree(conn, tree_root, BORDER_FOCUS_COLOR, BORDER_UNFOCUS_COLOR);
     }
 
     // Cleanup IPC clients
