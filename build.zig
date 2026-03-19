@@ -70,6 +70,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Shared layout module (pure Zig, no xcb dependency)
+    const layout_mod = b.createModule(.{
+        .root_source_file = b.path("src/layout.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "tree", .module = tree_mod },
+        },
+    });
+
     // --- Test step ---
     const test_step = b.step("test", "Run tests");
 
@@ -86,6 +96,21 @@ pub fn build(b: *std.Build) void {
     });
     const run_tree_tests = b.addRunArtifact(tree_tests);
     test_step.dependOn(&run_tree_tests.step);
+
+    // layout tests
+    const layout_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_layout.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "tree", .module = tree_mod },
+                .{ .name = "layout", .module = layout_mod },
+            },
+        }),
+    });
+    const run_layout_tests = b.addRunArtifact(layout_tests);
+    test_step.dependOn(&run_layout_tests.step);
 
     // Run steps
     const run_ziawm = b.addRunArtifact(ziawm_exe);

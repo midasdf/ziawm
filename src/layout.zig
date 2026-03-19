@@ -1,0 +1,170 @@
+const tree = @import("tree");
+
+const TAB_BAR_HEIGHT: u32 = 16;
+const MAX_TILING_CHILDREN: usize = 64;
+
+/// Apply layout to a container's children. Recursively descends into split_con children.
+/// gap: pixel gap between windows
+/// border: border width in pixels
+pub fn apply(con: *tree.Container, gap: u32, border: u32) void {
+    // Collect tiling children (skip floating, cap at MAX_TILING_CHILDREN)
+    var tiling: [MAX_TILING_CHILDREN]*tree.Container = undefined;
+    var count: usize = 0;
+
+    var cur = con.children.first;
+    while (cur) |child| : (cur = child.next) {
+        if (!child.is_floating) {
+            if (count < MAX_TILING_CHILDREN) {
+                tiling[count] = child;
+                count += 1;
+            }
+        }
+    }
+
+    if (count == 0) return;
+
+    const rect = con.rect;
+
+    switch (count) {
+        1 => {
+            // Monocle: single child fills entire area, no gap, no border adjustment
+            const child = tiling[0];
+            child.rect = rect;
+            child.window_rect = shrinkByBorder(rect, border);
+            child.dirty = false;
+            recurse(child, gap, border);
+        },
+        else => {
+            switch (con.layout) {
+                .hsplit => applyHsplit(tiling[0..count], rect, gap, border),
+                .vsplit => applyVsplit(tiling[0..count], rect, gap, border),
+                .tabbed => applyTabbed(tiling[0..count], rect, gap, border),
+                .stacked => applyStacked(tiling[0..count], rect, gap, border),
+            }
+        },
+    }
+}
+
+fn applyHsplit(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u32) void {
+    const n = children.len;
+    // Total gap space between children (n-1 gaps)
+    const total_gap: u32 = gap * @as(u32, @intCast(n - 1));
+    const available_w: u32 = if (rect.w > total_gap) rect.w - total_gap else 0;
+
+    // Check if any child has a custom percent
+    var has_percent = false;
+    for (children) |child| {
+        if (child.percent > 0.0) {
+            has_percent = true;
+            break;
+        }
+    }
+
+    var x: i32 = rect.x;
+    for (children, 0..) |child, i| {
+        const w: u32 = blk: {
+            if (i == children.len - 1) {
+                // Last child gets remainder
+                const used: u32 = if (x > rect.x) @intCast(x - rect.x) else 0;
+                break :blk if (rect.w > used) rect.w - used else 0;
+            }
+            if (has_percent and child.percent > 0.0) {
+                break :blk @intFromFloat(child.percent * @as(f32, @floatFromInt(available_w)));
+            } else {
+                // Equal distribution
+                break :blk available_w / @as(u32, @intCast(n));
+            }
+        };
+
+        child.rect = .{ .x = x, .y = rect.y, .w = w, .h = rect.h };
+        child.window_rect = shrinkByBorder(child.rect, border);
+        child.dirty = false;
+        recurse(child, gap, border);
+
+        x += @as(i32, @intCast(w)) + @as(i32, @intCast(gap));
+    }
+}
+
+fn applyVsplit(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u32) void {
+    const n = children.len;
+    const total_gap: u32 = gap * @as(u32, @intCast(n - 1));
+    const available_h: u32 = if (rect.h > total_gap) rect.h - total_gap else 0;
+
+    var has_percent = false;
+    for (children) |child| {
+        if (child.percent > 0.0) {
+            has_percent = true;
+            break;
+        }
+    }
+
+    var y: i32 = rect.y;
+    for (children, 0..) |child, i| {
+        const h: u32 = blk: {
+            if (i == children.len - 1) {
+                const used: u32 = if (y > rect.y) @intCast(y - rect.y) else 0;
+                break :blk if (rect.h > used) rect.h - used else 0;
+            }
+            if (has_percent and child.percent > 0.0) {
+                break :blk @intFromFloat(child.percent * @as(f32, @floatFromInt(available_h)));
+            } else {
+                break :blk available_h / @as(u32, @intCast(n));
+            }
+        };
+
+        child.rect = .{ .x = rect.x, .y = y, .w = rect.w, .h = h };
+        child.window_rect = shrinkByBorder(child.rect, border);
+        child.dirty = false;
+        recurse(child, gap, border);
+
+        y += @as(i32, @intCast(h)) + @as(i32, @intCast(gap));
+    }
+}
+
+fn applyTabbed(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u32) void {
+    // Tab bar at top: 16px per container (but spec says 16px total tab bar)
+    const content_y: i32 = rect.y + TAB_BAR_HEIGHT;
+    const content_h: u32 = if (rect.h > TAB_BAR_HEIGHT) rect.h - TAB_BAR_HEIGHT else 0;
+    const child_rect: tree.Rect = .{ .x = rect.x, .y = content_y, .w = rect.w, .h = content_h };
+
+    for (children) |child| {
+        child.rect = child_rect;
+        child.window_rect = shrinkByBorder(child_rect, border);
+        child.dirty = false;
+        recurse(child, gap, border);
+    }
+}
+
+fn applyStacked(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u32) void {
+    // Same as tabbed: 16px title bar area at top
+    const content_y: i32 = rect.y + TAB_BAR_HEIGHT;
+    const content_h: u32 = if (rect.h > TAB_BAR_HEIGHT) rect.h - TAB_BAR_HEIGHT else 0;
+    const child_rect: tree.Rect = .{ .x = rect.x, .y = content_y, .w = rect.w, .h = content_h };
+
+    for (children) |child| {
+        child.rect = child_rect;
+        child.window_rect = shrinkByBorder(child_rect, border);
+        child.dirty = false;
+        recurse(child, gap, border);
+    }
+}
+
+/// Recurse into split_con children.
+fn recurse(child: *tree.Container, gap: u32, border: u32) void {
+    if (child.type == .split_con) {
+        apply(child, gap, border);
+    }
+}
+
+/// Return rect shrunk by `border` pixels on each side.
+fn shrinkByBorder(rect: tree.Rect, border: u32) tree.Rect {
+    if (border == 0) return rect;
+    const b: i32 = @intCast(border);
+    const b2: u32 = border * 2;
+    return .{
+        .x = rect.x + b,
+        .y = rect.y + b,
+        .w = if (rect.w > b2) rect.w - b2 else 0,
+        .h = if (rect.h > b2) rect.h - b2 else 0,
+    };
+}
