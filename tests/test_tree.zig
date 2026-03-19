@@ -178,27 +178,33 @@ test "marks add/remove/has" {
     try std.testing.expectEqual(false, c.hasMark("urgent"));
     try std.testing.expectEqual(false, c.hasMark("foo"));
 
-    try c.addMark("urgent");
+    const mark1 = try alloc.dupe(u8, "urgent");
+    try c.addMark(mark1);
     try std.testing.expectEqual(true, c.hasMark("urgent"));
     try std.testing.expectEqual(@as(u8, 1), c.mark_count);
 
-    try c.addMark("foo");
+    const mark2 = try alloc.dupe(u8, "foo");
+    try c.addMark(mark2);
     try std.testing.expectEqual(true, c.hasMark("foo"));
     try std.testing.expectEqual(@as(u8, 2), c.mark_count);
 
-    // Adding duplicate mark should not increase count
-    try c.addMark("urgent");
+    // Adding duplicate mark should return DuplicateMark error
+    {
+        const dup = try alloc.dupe(u8, "urgent");
+        try std.testing.expectError(error.DuplicateMark, c.addMark(dup));
+        alloc.free(dup); // caller frees on error
+    }
     try std.testing.expectEqual(@as(u8, 2), c.mark_count);
 
-    c.removeMark("urgent");
+    c.removeMark(alloc, "urgent");
     try std.testing.expectEqual(false, c.hasMark("urgent"));
     try std.testing.expectEqual(true, c.hasMark("foo"));
     try std.testing.expectEqual(@as(u8, 1), c.mark_count);
 
-    c.removeMark("nonexistent"); // no-op
+    c.removeMark(alloc, "nonexistent"); // no-op
     try std.testing.expectEqual(@as(u8, 1), c.mark_count);
 
-    c.removeMark("foo");
+    c.removeMark(alloc, "foo");
     try std.testing.expectEqual(@as(u8, 0), c.mark_count);
 }
 
@@ -208,18 +214,19 @@ test "marks capacity limit" {
     defer c.destroy(alloc);
 
     // Fill to max capacity (8)
-    try c.addMark("m1");
-    try c.addMark("m2");
-    try c.addMark("m3");
-    try c.addMark("m4");
-    try c.addMark("m5");
-    try c.addMark("m6");
-    try c.addMark("m7");
-    try c.addMark("m8");
+    const mark_names = [_][]const u8{ "m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8" };
+    for (mark_names) |name| {
+        const owned = try alloc.dupe(u8, name);
+        try c.addMark(owned);
+    }
     try std.testing.expectEqual(@as(u8, 8), c.mark_count);
 
     // Adding one more should return error
-    try std.testing.expectError(error.MarksCapacityExceeded, c.addMark("m9"));
+    {
+        const overflow = try alloc.dupe(u8, "m9");
+        try std.testing.expectError(error.MarksCapacityExceeded, c.addMark(overflow));
+        alloc.free(overflow); // caller frees on error
+    }
 }
 
 test "insertBefore" {

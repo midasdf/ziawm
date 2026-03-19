@@ -1115,14 +1115,20 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
     const name = cmd.args[0] orelse return;
 
     // Find or create workspace
+    // Try by name first, then by number (for "workspace number N" commands)
     var ws = workspace.findByName(ctx.tree_root, name);
     if (ws == null) {
         const num = std.fmt.parseInt(i32, name, 10) catch 0;
-        ws = workspace.create(ctx.allocator, name, num) catch return;
-        // Attach to first output
-        if (getFirstOutput(ctx.tree_root)) |out| {
-            out.appendChild(ws.?);
-            ws.?.rect = out.rect;
+        if (num != 0) {
+            ws = workspace.findByNum(ctx.tree_root, num);
+        }
+        if (ws == null) {
+            ws = workspace.create(ctx.allocator, name, num) catch return;
+            // Attach to first output
+            if (getFirstOutput(ctx.tree_root)) |out| {
+                out.appendChild(ws.?);
+                ws.?.rect = out.rect;
+            }
         }
     }
 
@@ -1153,13 +1159,19 @@ fn executeMoveWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
     if (focused.type != .window) return;
 
     // Find or create target workspace
+    // Try by name first, then by number (for "workspace number N" commands)
     var ws = workspace.findByName(ctx.tree_root, name);
     if (ws == null) {
         const num = std.fmt.parseInt(i32, name, 10) catch 0;
-        ws = workspace.create(ctx.allocator, name, num) catch return;
-        if (getFirstOutput(ctx.tree_root)) |out| {
-            out.appendChild(ws.?);
-            ws.?.rect = out.rect;
+        if (num != 0) {
+            ws = workspace.findByNum(ctx.tree_root, num);
+        }
+        if (ws == null) {
+            ws = workspace.create(ctx.allocator, name, num) catch return;
+            if (getFirstOutput(ctx.tree_root)) |out| {
+                out.appendChild(ws.?);
+                ws.?.rect = out.rect;
+            }
         }
     }
 
@@ -1314,13 +1326,17 @@ fn executeFullscreen(ctx: *EventContext) void {
 fn executeMark(ctx: *EventContext, cmd: command_mod.Command) void {
     const mark_name = cmd.args[0] orelse return;
     const focused = getFocusedContainer(ctx.tree_root) orelse return;
-    focused.addMark(mark_name) catch {};
+    // Dupe the mark string so it outlives the command buffer
+    const owned_mark = ctx.allocator.dupe(u8, mark_name) catch return;
+    focused.addMark(owned_mark) catch {
+        ctx.allocator.free(owned_mark);
+    };
 }
 
 fn executeUnmark(ctx: *EventContext, cmd: command_mod.Command) void {
     const mark_name = cmd.args[0] orelse return;
     const focused = getFocusedContainer(ctx.tree_root) orelse return;
-    focused.removeMark(mark_name);
+    focused.removeMark(ctx.allocator, mark_name);
 }
 
 fn executeScratchpad(ctx: *EventContext, cmd: command_mod.Command) void {

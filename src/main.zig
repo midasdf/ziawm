@@ -44,7 +44,7 @@ fn handleIpcMessage(ctx: *event.EventContext, client_fd: std.posix.fd_t, msg_typ
         @intFromEnum(ipc.MessageType.get_workspaces) => buildWorkspacesJson(ctx, &dyn_buf),
         @intFromEnum(ipc.MessageType.get_outputs) => buildOutputsJson(ctx, &dyn_buf),
         @intFromEnum(ipc.MessageType.get_tree) => buildTreeJson(ctx, &dyn_buf),
-        @intFromEnum(ipc.MessageType.get_marks) => "[]",
+        @intFromEnum(ipc.MessageType.get_marks) => buildMarksJson(ctx, &dyn_buf),
         @intFromEnum(ipc.MessageType.get_bar_config) => "{}",
         @intFromEnum(ipc.MessageType.get_config) => "{}",
         @intFromEnum(ipc.MessageType.get_binding_modes) => "[\"default\"]",
@@ -186,6 +186,46 @@ fn buildOutputsJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
 
     w.writeByte(']') catch return "[]";
     return fbs.getWritten();
+}
+
+/// Build JSON for GET_MARKS response.
+/// Walks the entire tree collecting all marks from all containers.
+fn buildMarksJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
+    var fbs = std.io.fixedBufferStream(buf);
+    const w = fbs.writer();
+    w.writeByte('[') catch return "[]";
+
+    var first = true;
+    collectMarksRecursive(ctx.tree_root, w, &first) catch return "[]";
+
+    w.writeByte(']') catch return "[]";
+    return fbs.getWritten();
+}
+
+fn collectMarksRecursive(con: *tree.Container, w: anytype, first: *bool) !void {
+    // Collect marks from this container
+    for (con.marks[0..con.mark_count]) |mark_opt| {
+        if (mark_opt) |mark| {
+            if (!first.*) try w.writeByte(',');
+            first.* = false;
+            try w.writeByte('"');
+            for (mark) |ch| {
+                switch (ch) {
+                    '"' => try w.writeAll("\\\""),
+                    '\\' => try w.writeAll("\\\\"),
+                    else => {
+                        if (ch >= 0x20) try w.writeByte(ch);
+                    },
+                }
+            }
+            try w.writeByte('"');
+        }
+    }
+    // Recurse into children
+    var cur = con.children.first;
+    while (cur) |child| : (cur = child.next) {
+        try collectMarksRecursive(child, w, first);
+    }
 }
 
 /// Build JSON for GET_TREE response.
@@ -615,7 +655,7 @@ pub fn main() !void {
     var events: [16]linux.epoll_event = undefined;
 
     while (running) {
-        const nfds = linux.epoll_wait(@intCast(epoll_fd), &events, events.len, -1);
+        const nfds = linux.epoll_wait(@intCast(epoll_fd), &events, events.len, 100);
         const nfds_signed: isize = @bitCast(nfds);
 
         if (nfds_signed < 0) {

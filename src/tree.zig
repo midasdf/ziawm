@@ -163,6 +163,12 @@ pub const Container = struct {
         if (self.workspace) |wsd| {
             freeOwnedString(alloc, wsd.name);
         }
+        // Free allocator-owned mark strings
+        for (self.marks[0..self.mark_count]) |mark_opt| {
+            if (mark_opt) |mark| {
+                freeOwnedString(alloc, mark);
+            }
+        }
         alloc.destroy(self);
     }
 
@@ -215,13 +221,14 @@ pub const Container = struct {
         return null;
     }
 
-    /// Add a mark string. Duplicate marks are silently ignored.
+    /// Add a mark string (caller-owned). Duplicate marks are rejected.
     /// Returns `error.MarksCapacityExceeded` if the marks array is full.
+    /// Returns `error.DuplicateMark` if the mark already exists.
     pub fn addMark(self: *Container, mark: []const u8) !void {
         // Check duplicate
         for (self.marks[0..self.mark_count]) |existing| {
             if (existing) |m| {
-                if (std.mem.eql(u8, m, mark)) return;
+                if (std.mem.eql(u8, m, mark)) return error.DuplicateMark;
             }
         }
         if (self.mark_count >= 8) return error.MarksCapacityExceeded;
@@ -229,11 +236,13 @@ pub const Container = struct {
         self.mark_count += 1;
     }
 
-    /// Remove a mark string. No-op if the mark is not present.
-    pub fn removeMark(self: *Container, mark: []const u8) void {
+    /// Remove a mark string and free its memory. No-op if the mark is not present.
+    pub fn removeMark(self: *Container, alloc: Allocator, mark: []const u8) void {
         for (self.marks[0..self.mark_count], 0..) |existing, i| {
             if (existing) |m| {
                 if (std.mem.eql(u8, m, mark)) {
+                    // Free the owned mark string
+                    freeOwnedString(alloc, m);
                     // Shift remaining marks down
                     const count = self.mark_count;
                     var j = i;
