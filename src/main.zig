@@ -21,9 +21,13 @@ const DEFAULT_BORDER_UNFOCUS_COLOR: u32 = 0x333333;
 
 // IPC constants
 const IPC_LISTEN_FD_TAG: i32 = -100; // sentinel for epoll data.fd
+const SIGNAL_FD_TAG: i32 = -200; // sentinel for signalfd in epoll
 const MAX_IPC_CLIENTS: usize = 16;
 
 fn handleIpcMessage(ctx: *event.EventContext, client_fd: std.posix.fd_t, msg_type: u32, payload: []const u8) void {
+    // For dynamic responses, use stack buffer
+    var dyn_buf: [8192]u8 = undefined;
+
     const response: []const u8 = switch (msg_type) {
         @intFromEnum(ipc.MessageType.get_version) =>
             "{\"human_readable\":\"ziawm " ++ VERSION ++ "\",\"loaded_config_file_name\":\"\",\"minor\":1,\"major\":0,\"patch\":0}",
@@ -36,9 +40,9 @@ fn handleIpcMessage(ctx: *event.EventContext, client_fd: std.posix.fd_t, msg_typ
             }
             break :blk "[{\"success\":true}]";
         },
-        @intFromEnum(ipc.MessageType.get_workspaces) => "[]",
+        @intFromEnum(ipc.MessageType.get_workspaces) => buildWorkspacesJson(ctx, &dyn_buf),
         @intFromEnum(ipc.MessageType.get_outputs) => "[]",
-        @intFromEnum(ipc.MessageType.get_tree) => "{}",
+        @intFromEnum(ipc.MessageType.get_tree) => buildTreeJson(ctx, &dyn_buf),
         @intFromEnum(ipc.MessageType.get_marks) => "[]",
         @intFromEnum(ipc.MessageType.get_bar_config) => "{}",
         @intFromEnum(ipc.MessageType.get_config) => "{}",
@@ -49,6 +53,146 @@ fn handleIpcMessage(ctx: *event.EventContext, client_fd: std.posix.fd_t, msg_typ
     };
 
     ipc.writeResponse(client_fd, msg_type, response) catch {};
+}
+
+/// Build JSON for GET_WORKSPACES response.
+fn buildWorkspacesJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
+    var fbs = std.io.fixedBufferStream(buf);
+    const w = fbs.writer();
+    w.writeByte('[') catch return "[]";
+
+    var first = true;
+    var out_cur = ctx.tree_root.children.first;
+    while (out_cur) |out_con| : (out_cur = out_con.next) {
+        if (out_con.type != .output) continue;
+        var ws_cur = out_con.children.first;
+        while (ws_cur) |ws| : (ws_cur = ws.next) {
+            if (ws.type != .workspace) continue;
+            if (!first) w.writeByte(',') catch return "[]";
+            first = false;
+
+            const name = if (ws.workspace) |wsd| wsd.name else "?";
+            const num: i32 = if (ws.workspace) |wsd| (wsd.num orelse 0) else 0;
+            const visible = ws.is_focused or (ws.children.first != null);
+            const focused = ws.is_focused;
+            // Check urgency on any child window
+            var urgent = false;
+            var child_cur = ws.children.first;
+            while (child_cur) |child| : (child_cur = child.next) {
+                if (child.window) |wd| {
+                    if (wd.urgency) {
+                        urgent = true;
+                        break;
+                    }
+                }
+            }
+
+            std.fmt.format(w, "{{\"num\":{d},\"name\":\"{s}\",\"visible\":{},\"focused\":{},\"output\":\"default\",\"urgent\":{},\"rect\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}}}}", .{
+                num,
+                name,
+                visible,
+                focused,
+                urgent,
+                ws.rect.x,
+                ws.rect.y,
+                ws.rect.w,
+                ws.rect.h,
+            }) catch return "[]";
+        }
+    }
+
+    w.writeByte(']') catch return "[]";
+    return fbs.getWritten();
+}
+
+/// Build JSON for GET_TREE response.
+fn buildTreeJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
+    var fbs = std.io.fixedBufferStream(buf);
+    const w = fbs.writer();
+    writeContainerJson(w, ctx.tree_root) catch return "{}";
+    return fbs.getWritten();
+}
+
+fn writeContainerJson(w: anytype, con: *tree.Container) !void {
+    try w.writeAll("{");
+
+    // id
+    const id: u32 = if (con.window) |wd| wd.id else 0;
+    try std.fmt.format(w, "\"id\":{d}", .{id});
+
+    // type
+    const type_str = switch (con.type) {
+        .root => "root",
+        .output => "output",
+        .workspace => "workspace",
+        .split_con => "con",
+        .window => "con",
+    };
+    try std.fmt.format(w, ",\"type\":\"{s}\"", .{type_str});
+
+    // name
+    if (con.workspace) |wsd| {
+        try std.fmt.format(w, ",\"name\":\"{s}\"", .{wsd.name});
+    } else if (con.window) |wd| {
+        // Escape window title for JSON (simple: just skip control chars)
+        try w.writeAll(",\"name\":\"");
+        for (wd.title) |ch| {
+            if (ch == '"') {
+                try w.writeAll("\\\"");
+            } else if (ch == '\\') {
+                try w.writeAll("\\\\");
+            } else if (ch >= 0x20) {
+                try w.writeByte(ch);
+            }
+        }
+        try w.writeAll("\"");
+    }
+
+    // layout
+    const layout_str = switch (con.layout) {
+        .hsplit => "splith",
+        .vsplit => "splitv",
+        .tabbed => "tabbed",
+        .stacked => "stacked",
+    };
+    try std.fmt.format(w, ",\"layout\":\"{s}\"", .{layout_str});
+
+    // focused
+    try std.fmt.format(w, ",\"focused\":{}", .{con.is_focused});
+
+    // rect
+    try std.fmt.format(w, ",\"rect\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}}", .{
+        con.rect.x, con.rect.y, con.rect.w, con.rect.h,
+    });
+
+    // floating
+    if (con.is_floating) {
+        try w.writeAll(",\"floating\":\"user_on\"");
+    }
+
+    // fullscreen
+    try std.fmt.format(w, ",\"fullscreen_mode\":{d}", .{@intFromEnum(con.is_fullscreen)});
+
+    // window (X11 window ID)
+    if (con.window) |wd| {
+        try std.fmt.format(w, ",\"window\":{d}", .{wd.id});
+        if (wd.class.len > 0) {
+            try std.fmt.format(w, ",\"window_properties\":{{\"class\":\"{s}\",\"instance\":\"{s}\"}}", .{ wd.class, wd.instance });
+        }
+    }
+
+    // nodes (children)
+    try w.writeAll(",\"nodes\":[");
+    var first = true;
+    var cur = con.children.first;
+    while (cur) |child| : (cur = child.next) {
+        if (!first) try w.writeByte(',');
+        first = false;
+        try writeContainerJson(w, child);
+    }
+    try w.writeAll("]");
+
+    try w.writeAll("}");
 }
 
 /// Try to load config from standard paths. Returns null if no config found.
@@ -307,7 +451,35 @@ pub fn main() !void {
         }
     }
 
-    // TODO: Add signalfd to epoll (Task 19)
+    // 8a. Setup signalfd for SIGCHLD, SIGTERM, SIGINT, SIGHUP, SIGUSR1
+    var sig_mask = std.mem.zeroes(linux.sigset_t);
+    linux.sigaddset(&sig_mask, linux.SIG.CHLD);
+    linux.sigaddset(&sig_mask, linux.SIG.TERM);
+    linux.sigaddset(&sig_mask, linux.SIG.INT);
+    linux.sigaddset(&sig_mask, linux.SIG.HUP);
+    linux.sigaddset(&sig_mask, linux.SIG.USR1);
+    // Block these signals so they are delivered via signalfd instead
+    _ = linux.sigprocmask(linux.SIG.BLOCK, &sig_mask, null);
+
+    const sig_fd = linux.signalfd(-1, &sig_mask, linux.SFD.NONBLOCK | linux.SFD.CLOEXEC);
+    const sig_fd_signed: isize = @bitCast(sig_fd);
+    if (sig_fd_signed < 0) {
+        std.debug.print("ERROR: signalfd failed\n", .{});
+        return error.SignalfdFailed;
+    }
+    defer std.posix.close(@intCast(sig_fd));
+
+    var sig_event = linux.epoll_event{
+        .events = linux.EPOLL.IN,
+        .data = .{ .fd = SIGNAL_FD_TAG },
+    };
+    {
+        const sig_ctl = linux.epoll_ctl(@intCast(epoll_fd), linux.EPOLL.CTL_ADD, @intCast(sig_fd), &sig_event);
+        if (@as(isize, @bitCast(sig_ctl)) < 0) {
+            std.debug.print("ERROR: epoll_ctl for signalfd failed\n", .{});
+            return error.EpollCtlFailed;
+        }
+    }
 
     // 9. Event context
     var running: bool = true;
@@ -339,6 +511,14 @@ pub fn main() !void {
             }
         }
     }
+
+    // 11a. Set initial EWMH properties
+    event.updateClientList(&ctx);
+    event.updateNumberOfDesktops(&ctx);
+    event.updateCurrentDesktop(&ctx);
+    event.updateDesktopNames(&ctx);
+    event.updateActiveWindow(&ctx, xcb.WINDOW_NONE);
+    _ = xcb.flush(conn);
 
     // 12. Event loop
     var events: [16]linux.epoll_event = undefined;
@@ -406,7 +586,52 @@ pub fn main() !void {
                     }
                 }
             }
-            // TODO: handle signalfd (Task 19)
+            if (ev.data.fd == SIGNAL_FD_TAG) {
+                // Read signalfd_siginfo structs
+                var sigbuf: [@sizeOf(linux.signalfd_siginfo)]u8 align(@alignOf(linux.signalfd_siginfo)) = undefined;
+                while (true) {
+                    const n = linux.read(@intCast(sig_fd), &sigbuf, sigbuf.len);
+                    const n_signed: isize = @bitCast(n);
+                    if (n_signed <= 0) break;
+                    const info: *const linux.signalfd_siginfo = @ptrCast(&sigbuf);
+                    switch (info.signo) {
+                        linux.SIG.CHLD => {
+                            // Reap all zombie children using wait4(-1, ..., WNOHANG)
+                            var wstatus: u32 = 0;
+                            while (true) {
+                                const res = linux.wait4(-1, &wstatus, linux.W.NOHANG, null);
+                                const res_signed: isize = @bitCast(res);
+                                if (res_signed <= 0) break; // no more zombies or error
+                            }
+                        },
+                        linux.SIG.TERM, linux.SIG.INT => {
+                            running = false;
+                        },
+                        linux.SIG.HUP => {
+                            // TODO: full restart. For now, just exit.
+                            running = false;
+                        },
+                        linux.SIG.USR1 => {
+                            // Reload config
+                            std.debug.print("ziawm: SIGUSR1 received, reloading config\n", .{});
+                            if (config) |*cfg| cfg.deinit();
+                            config = loadConfig(allocator);
+                            if (config) |*cfg| {
+                                border_focus_color = parseColor(cfg.focused_border);
+                                border_unfocus_color = parseColor(cfg.unfocused_border);
+                                ctx.border_focus_color = border_focus_color;
+                                ctx.border_unfocus_color = border_unfocus_color;
+                                ctx.focus_follows_mouse = cfg.focus_follows_mouse;
+                                ctx.config = cfg;
+                                event.grabKeys(&ctx, cfg);
+                            } else {
+                                ctx.config = null;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
         }
     }
 

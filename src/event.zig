@@ -137,19 +137,10 @@ fn setFocus(ctx: *EventContext, con: *tree.Container) void {
     // Set X11 input focus
     if (con.window) |wd| {
         _ = xcb.setInputFocus(ctx.conn, xcb.INPUT_FOCUS_POINTER_ROOT, wd.id, xcb.CURRENT_TIME);
-
-        // Update _NET_ACTIVE_WINDOW
-        const win_val = [_]u32{wd.id};
-        _ = xcb.changeProperty(
-            ctx.conn,
-            xcb.PROP_MODE_REPLACE,
-            ctx.root_window,
-            ctx.atoms.net_active_window,
-            xcb.ATOM_WINDOW,
-            32,
-            1,
-            @ptrCast(&win_val),
-        );
+        updateActiveWindow(ctx, wd.id);
+    } else {
+        // No window (e.g. focusing a workspace) — clear active window
+        updateActiveWindow(ctx, xcb.WINDOW_NONE);
     }
 }
 
@@ -182,6 +173,150 @@ fn relayoutAndRender(ctx: *EventContext) void {
     render.applyTree(ctx.conn, ctx.tree_root, ctx.border_focus_color, ctx.border_unfocus_color);
 }
 
+// --- EWMH property update helpers ---
+
+/// Collect all managed window IDs and set _NET_CLIENT_LIST on the root window.
+pub fn updateClientList(ctx: *EventContext) void {
+    var ids: [256]u32 = undefined;
+    var count: usize = 0;
+    collectWindowIds(ctx.tree_root, &ids, &count);
+
+    _ = xcb.changeProperty(
+        ctx.conn,
+        xcb.PROP_MODE_REPLACE,
+        ctx.root_window,
+        ctx.atoms.net_client_list,
+        xcb.ATOM_WINDOW,
+        32,
+        @intCast(count),
+        if (count > 0) @ptrCast(&ids) else null,
+    );
+}
+
+fn collectWindowIds(con: *tree.Container, ids: *[256]u32, count: *usize) void {
+    if (con.window) |wd| {
+        if (count.* < 256) {
+            ids[count.*] = wd.id;
+            count.* += 1;
+        }
+    }
+    var cur = con.children.first;
+    while (cur) |child| : (cur = child.next) {
+        collectWindowIds(child, ids, count);
+    }
+}
+
+/// Set _NET_CURRENT_DESKTOP on the root window.
+pub fn updateCurrentDesktop(ctx: *EventContext) void {
+    // Find the focused workspace index
+    var idx: u32 = 0;
+    var found: u32 = 0;
+    var out_cur = ctx.tree_root.children.first;
+    while (out_cur) |out_con| : (out_cur = out_con.next) {
+        if (out_con.type != .output) continue;
+        var ws_cur = out_con.children.first;
+        while (ws_cur) |ws| : (ws_cur = ws.next) {
+            if (ws.type != .workspace) continue;
+            if (ws.is_focused) {
+                found = idx;
+            }
+            idx += 1;
+        }
+    }
+
+    const val = [_]u32{found};
+    _ = xcb.changeProperty(
+        ctx.conn,
+        xcb.PROP_MODE_REPLACE,
+        ctx.root_window,
+        ctx.atoms.net_current_desktop,
+        xcb.ATOM_CARDINAL,
+        32,
+        1,
+        @ptrCast(&val),
+    );
+}
+
+/// Set _NET_DESKTOP_NAMES on root window (null-separated UTF8 string list).
+pub fn updateDesktopNames(ctx: *EventContext) void {
+    var buf: [1024]u8 = undefined;
+    var pos: usize = 0;
+
+    var out_cur = ctx.tree_root.children.first;
+    while (out_cur) |out_con| : (out_cur = out_con.next) {
+        if (out_con.type != .output) continue;
+        var ws_cur = out_con.children.first;
+        while (ws_cur) |ws| : (ws_cur = ws.next) {
+            if (ws.type != .workspace) continue;
+            const name = if (ws.workspace) |wsd| wsd.name else "?";
+            if (pos + name.len + 1 > buf.len) break;
+            @memcpy(buf[pos..][0..name.len], name);
+            pos += name.len;
+            buf[pos] = 0; // null separator
+            pos += 1;
+        }
+    }
+
+    _ = xcb.changeProperty(
+        ctx.conn,
+        xcb.PROP_MODE_REPLACE,
+        ctx.root_window,
+        ctx.atoms.net_desktop_names,
+        ctx.atoms.utf8_string,
+        8,
+        @intCast(pos),
+        if (pos > 0) @ptrCast(&buf) else null,
+    );
+}
+
+/// Set _NET_NUMBER_OF_DESKTOPS on root window.
+pub fn updateNumberOfDesktops(ctx: *EventContext) void {
+    var count: u32 = 0;
+    var out_cur = ctx.tree_root.children.first;
+    while (out_cur) |out_con| : (out_cur = out_con.next) {
+        if (out_con.type != .output) continue;
+        var ws_cur = out_con.children.first;
+        while (ws_cur) |ws| : (ws_cur = ws.next) {
+            if (ws.type == .workspace) count += 1;
+        }
+    }
+
+    const val = [_]u32{count};
+    _ = xcb.changeProperty(
+        ctx.conn,
+        xcb.PROP_MODE_REPLACE,
+        ctx.root_window,
+        ctx.atoms.net_number_of_desktops,
+        xcb.ATOM_CARDINAL,
+        32,
+        1,
+        @ptrCast(&val),
+    );
+}
+
+/// Set _NET_ACTIVE_WINDOW on root window.
+pub fn updateActiveWindow(ctx: *EventContext, window_id: u32) void {
+    const val = [_]u32{window_id};
+    _ = xcb.changeProperty(
+        ctx.conn,
+        xcb.PROP_MODE_REPLACE,
+        ctx.root_window,
+        ctx.atoms.net_active_window,
+        xcb.ATOM_WINDOW,
+        32,
+        1,
+        @ptrCast(&val),
+    );
+}
+
+/// Update all EWMH properties (convenience for after structural changes).
+fn updateAllEwmh(ctx: *EventContext) void {
+    updateClientList(ctx);
+    updateNumberOfDesktops(ctx);
+    updateCurrentDesktop(ctx);
+    updateDesktopNames(ctx);
+}
+
 // --- X11 property helpers ---
 
 /// Read a string property from a window. Returns slice into reply data (freed with reply).
@@ -202,33 +337,37 @@ fn getStringProperty(conn: *xcb.Connection, window: xcb.Window, property: xcb.At
 }
 
 /// Read WM_CLASS property (two null-terminated strings: instance, class).
-fn readWmClass(conn: *xcb.Connection, window: xcb.Window) struct { instance: []const u8, class: []const u8 } {
+/// Returns allocator-owned copies of the strings.
+fn readWmClass(allocator: std.mem.Allocator, conn: *xcb.Connection, window: xcb.Window) struct { instance: []const u8, class: []const u8 } {
     const result = getStringProperty(conn, window, xcb.ATOM_WM_CLASS, xcb.ATOM_STRING) orelse
         return .{ .instance = "", .class = "" };
     defer std.c.free(result.reply);
 
     const data = result.data;
     // Find first null (end of instance)
-    const null_pos = std.mem.indexOfScalar(u8, data, 0) orelse return .{ .instance = data, .class = "" };
-    const instance = data[0..null_pos];
+    const null_pos = std.mem.indexOfScalar(u8, data, 0) orelse {
+        return .{ .instance = allocator.dupe(u8, data) catch "", .class = "" };
+    };
+    const instance = allocator.dupe(u8, data[0..null_pos]) catch "";
     const rest = data[null_pos + 1 ..];
     // Find second null (end of class) or use rest of data
     const class_end = std.mem.indexOfScalar(u8, rest, 0) orelse rest.len;
-    const class = rest[0..class_end];
+    const class = allocator.dupe(u8, rest[0..class_end]) catch "";
     return .{ .instance = instance, .class = class };
 }
 
 /// Read window title (_NET_WM_NAME or WM_NAME).
-fn readTitle(conn: *xcb.Connection, window: xcb.Window, atoms: atoms_mod.Atoms) []const u8 {
+/// Returns an allocator-owned copy of the string.
+fn readTitle(allocator: std.mem.Allocator, conn: *xcb.Connection, window: xcb.Window, atoms: atoms_mod.Atoms) []const u8 {
     // Try _NET_WM_NAME (UTF8) first
     if (getStringProperty(conn, window, atoms.net_wm_name, atoms.utf8_string)) |result| {
         defer std.c.free(result.reply);
-        return result.data;
+        return allocator.dupe(u8, result.data) catch "";
     }
     // Fallback to WM_NAME
     if (getStringProperty(conn, window, xcb.ATOM_WM_NAME, xcb.ATOM_STRING)) |result| {
         defer std.c.free(result.reply);
-        return result.data;
+        return allocator.dupe(u8, result.data) catch "";
     }
     return "";
 }
@@ -268,6 +407,18 @@ fn shouldFloatByType(conn: *xcb.Connection, window: xcb.Window, atoms: atoms_mod
     return false;
 }
 
+/// Free allocator-owned strings stored in a container's WindowData.
+fn freeWindowStrings(allocator: std.mem.Allocator, con: *tree.Container) void {
+    if (con.window) |*wd| {
+        if (wd.class.len > 0) allocator.free(wd.class);
+        if (wd.instance.len > 0) allocator.free(wd.instance);
+        if (wd.title.len > 0) allocator.free(wd.title);
+        wd.class = "";
+        wd.instance = "";
+        wd.title = "";
+    }
+}
+
 // --- Event handlers ---
 
 fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
@@ -292,9 +443,9 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     // Create new container
     const con = tree.Container.create(ctx.allocator, .window) catch return;
 
-    // Read window properties
-    const wm_class = readWmClass(ctx.conn, window);
-    const title = readTitle(ctx.conn, window, ctx.atoms);
+    // Read window properties (allocator-owned copies)
+    const wm_class = readWmClass(ctx.allocator, ctx.conn, window);
+    const title = readTitle(ctx.allocator, ctx.conn, window, ctx.atoms);
     const transient = readTransientFor(ctx.conn, window);
     var should_float = transient != null;
     if (!should_float) {
@@ -372,6 +523,9 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     // Set focus to new window
     setFocus(ctx, con);
 
+    // Update EWMH properties
+    updateAllEwmh(ctx);
+
     // Layout and render
     relayoutAndRender(ctx);
 }
@@ -390,9 +544,11 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
         }
     }
 
+    freeWindowStrings(ctx.allocator, con);
     con.unlink();
     con.destroy(ctx.allocator);
 
+    updateAllEwmh(ctx);
     relayoutAndRender(ctx);
 }
 
@@ -408,9 +564,11 @@ fn handleDestroyNotify(ctx: *EventContext, ev: *xcb.DestroyNotifyEvent) void {
         }
     }
 
+    freeWindowStrings(ctx.allocator, con);
     con.unlink();
     con.destroy(ctx.allocator);
 
+    updateAllEwmh(ctx);
     relayoutAndRender(ctx);
 }
 
@@ -596,9 +754,14 @@ fn handlePropertyNotify(ctx: *EventContext, ev: *xcb.PropertyNotifyEvent) void {
 
     // Update title
     if (ev.atom == ctx.atoms.net_wm_name or ev.atom == xcb.ATOM_WM_NAME) {
-        const title = readTitle(ctx.conn, ev.window, ctx.atoms);
+        const title = readTitle(ctx.allocator, ctx.conn, ev.window, ctx.atoms);
         if (con.window) |*wd| {
+            // Free old title
+            if (wd.title.len > 0) ctx.allocator.free(wd.title);
             wd.title = title;
+        } else {
+            // No window data to store into; free the new allocation
+            if (title.len > 0) ctx.allocator.free(title);
         }
     }
 
@@ -877,6 +1040,9 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
             setFocus(ctx, getDeepestChild(child));
         }
 
+        updateCurrentDesktop(ctx);
+        updateDesktopNames(ctx);
+        updateNumberOfDesktops(ctx);
         relayoutAndRender(ctx);
     }
 }
