@@ -119,7 +119,7 @@ pub const Config = struct {
 
             // Expand variables in this line
             var expanded_buf: [1024]u8 = undefined;
-            const line = try expandVariables(&cfg, line_trimmed, &expanded_buf);
+            const line = expandVariables(&cfg, line_trimmed, &expanded_buf) catch continue; // skip lines that exceed 1024 chars after expansion
 
             // Handle closing brace (end of mode or bar block)
             if (std.mem.eql(u8, line, "}")) {

@@ -178,23 +178,40 @@ pub fn main() !void {
 
     std.debug.print("zephwm-bar v{s} started (ipc: {s})\n", .{ VERSION, sock_path });
 
-    // 6. Main loop: poll for X events + periodic IPC refresh
+    // 6. Main loop: epoll on XCB fd with 500ms timeout for workspace refresh
+    const linux = std.os.linux;
+    const xcb_fd: i32 = c.xcb_get_file_descriptor(conn);
+    const epoll_fd = linux.epoll_create1(0);
+    if (@as(isize, @bitCast(epoll_fd)) < 0) {
+        std.debug.print("zephwm-bar: epoll_create1 failed\n", .{});
+        return;
+    }
+    defer std.posix.close(@intCast(epoll_fd));
+
+    var xcb_event = linux.epoll_event{
+        .events = linux.EPOLL.IN,
+        .data = .{ .fd = xcb_fd },
+    };
+    _ = linux.epoll_ctl(@intCast(epoll_fd), linux.EPOLL.CTL_ADD, @intCast(xcb_fd), &xcb_event);
+
     var running = true;
-    var last_refresh: i64 = 0;
+    // Initial refresh + draw
+    refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_count);
+    drawBar(conn, dpy, draw, font, gc, bar_win, screen_width, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, ws_count, status_text[0..status_len], &focused_fg, &unfocused_fg, &fg_color);
 
     while (running) {
-        const now = std.time.milliTimestamp();
+        // Wait for X events or 500ms timeout (for workspace refresh)
+        var events: [4]linux.epoll_event = undefined;
+        const nfds = linux.epoll_wait(@intCast(epoll_fd), &events, events.len, 500);
+        const nfds_signed: isize = @bitCast(nfds);
 
-        // Refresh workspace info every 500ms
-        if (now - last_refresh > 500) {
-            refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_count);
-            last_refresh = now;
-
-            // Redraw
-            drawBar(conn, dpy, draw, font, gc, bar_win, screen_width, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, ws_count, status_text[0..status_len], &focused_fg, &unfocused_fg, &fg_color);
+        if (nfds_signed < 0) {
+            const err = linux.E.init(nfds);
+            if (err == .INTR) continue;
+            break;
         }
 
-        // Process X events (non-blocking)
+        // Process X events
         _ = c.XSync(dpy, 0);
         while (c.xcb_poll_for_event(conn)) |ev| {
             const response_type = ev.*.response_type & 0x7f;
@@ -218,8 +235,9 @@ pub fn main() !void {
 
         if (c.xcb_connection_has_error(conn) != 0) break;
 
-        // Small sleep to avoid busy loop
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        // Refresh workspace state on timeout or after processing events
+        refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_count);
+        drawBar(conn, dpy, draw, font, gc, bar_win, screen_width, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, ws_count, status_text[0..status_len], &focused_fg, &unfocused_fg, &fg_color);
     }
 
     std.debug.print("zephwm-bar shutting down\n", .{});

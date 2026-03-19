@@ -12,6 +12,8 @@ const layout = @import("layout.zig");
 const render = @import("render.zig");
 const output = @import("output.zig");
 
+pub const WindowMap = std.AutoHashMapUnmanaged(u32, *tree.Container);
+
 pub const EventContext = struct {
     conn: *xcb.Connection,
     root_window: xcb.Window,
@@ -26,6 +28,8 @@ pub const EventContext = struct {
     border_focus_color: u32,
     border_unfocus_color: u32,
     randr_base_event: u8 = 0,
+    /// O(1) window ID → container lookup. Updated on map/unmap/destroy.
+    window_map: WindowMap = .{},
 };
 
 /// Dispatch an X11 event to the appropriate handler.
@@ -65,16 +69,19 @@ fn handleRandrScreenChange(ctx: *EventContext) void {
 
 // --- Tree helpers ---
 
-/// Find a container by X11 window ID, walking the entire tree.
-fn findContainerByWindow(root: *tree.Container, window: xcb.Window) ?*tree.Container {
-    if (root.window) |wd| {
-        if (wd.id == window) return root;
-    }
-    var cur = root.children.first;
-    while (cur) |child| : (cur = child.next) {
-        if (findContainerByWindow(child, window)) |found| return found;
-    }
-    return null;
+/// Find a container by X11 window ID using the O(1) HashMap.
+fn findContainerByWindow(ctx: *EventContext, window: xcb.Window) ?*tree.Container {
+    return ctx.window_map.get(window);
+}
+
+/// Register a window in the lookup map.
+fn registerWindow(ctx: *EventContext, window: xcb.Window, con: *tree.Container) void {
+    ctx.window_map.put(ctx.allocator, window, con) catch {};
+}
+
+/// Unregister a window from the lookup map.
+fn unregisterWindow(ctx: *EventContext, window: xcb.Window) void {
+    _ = ctx.window_map.remove(window);
 }
 
 /// Find the deepest focused container (leaf) in a subtree.
@@ -154,6 +161,12 @@ fn getFirstOutput(root: *tree.Container) ?*tree.Container {
     return null;
 }
 
+/// Get the output containing the currently focused workspace.
+fn getFocusedOutput(root: *tree.Container) ?*tree.Container {
+    const ws = getFocusedWorkspace(root) orelse return getFirstOutput(root);
+    return ws.parent;
+}
+
 /// Get the workspace containing a container (walk up parents).
 fn getWorkspaceFor(con: *tree.Container) ?*tree.Container {
     var c: ?*tree.Container = con;
@@ -166,8 +179,9 @@ fn getWorkspaceFor(con: *tree.Container) ?*tree.Container {
 
 /// Set focus on a container, clearing old focus.
 fn setFocus(ctx: *EventContext, con: *tree.Container) void {
-    // Clear old focus along the path
-    clearFocusRecursive(ctx.tree_root);
+    // Clear old focused path: walk from root following is_focused children,
+    // clearing each node. O(depth) instead of O(total_nodes).
+    clearFocusedPath(ctx.tree_root);
 
     // Set focus on the container and all its ancestors
     var c: ?*tree.Container = con;
@@ -186,11 +200,25 @@ fn setFocus(ctx: *EventContext, con: *tree.Container) void {
     }
 }
 
-fn clearFocusRecursive(con: *tree.Container) void {
-    con.is_focused = false;
-    var cur = con.children.first;
-    while (cur) |child| : (cur = child.next) {
-        clearFocusRecursive(child);
+/// Clear is_focused along the currently focused path only. O(depth).
+fn clearFocusedPath(root: *tree.Container) void {
+    var con = root;
+    while (true) {
+        con.is_focused = false;
+        // Find the focused child to continue down
+        var found_child: ?*tree.Container = null;
+        var cur = con.children.first;
+        while (cur) |child| : (cur = child.next) {
+            if (child.is_focused) {
+                found_child = child;
+                break;
+            }
+        }
+        if (found_child) |child| {
+            con = child;
+        } else {
+            break;
+        }
     }
 }
 
@@ -254,9 +282,15 @@ fn relayoutAndRender(ctx: *EventContext) void {
 
 /// Collect all managed window IDs and set _NET_CLIENT_LIST on the root window.
 pub fn updateClientList(ctx: *EventContext) void {
-    var ids: [256]u32 = undefined;
+    // Build client list from window_map (O(n) where n = managed windows, no tree walk)
+    var ids: [1024]u32 = undefined;
     var count: usize = 0;
-    collectWindowIds(ctx.tree_root, &ids, &count);
+    var iter = ctx.window_map.iterator();
+    while (iter.next()) |entry| {
+        if (count >= 1024) break;
+        ids[count] = entry.key_ptr.*;
+        count += 1;
+    }
 
     _ = xcb.changeProperty(
         ctx.conn,
@@ -268,22 +302,6 @@ pub fn updateClientList(ctx: *EventContext) void {
         @intCast(count),
         if (count > 0) @ptrCast(&ids) else null,
     );
-}
-
-fn collectWindowIds(con: *tree.Container, ids: *[256]u32, count: *usize) void {
-    if (con.window) |wd| {
-        if (count.* < 256) {
-            ids[count.*] = wd.id;
-            count.* += 1;
-        } else {
-            std.log.warn("_NET_CLIENT_LIST: exceeded 256 window limit, some windows omitted", .{});
-            return;
-        }
-    }
-    var cur = con.children.first;
-    while (cur) |child| : (cur = child.next) {
-        collectWindowIds(child, ids, count);
-    }
 }
 
 /// Set _NET_CURRENT_DESKTOP on the root window.
@@ -490,6 +508,15 @@ fn readWindowTypeName(allocator: std.mem.Allocator, conn: *xcb.Connection, windo
     return allocator.dupe(u8, type_name) catch "";
 }
 
+/// Read WM_WINDOW_ROLE property. Returns allocator-owned string.
+fn readWindowRole(allocator: std.mem.Allocator, conn: *xcb.Connection, window: xcb.Window, atoms: atoms_mod.Atoms) []const u8 {
+    if (getStringProperty(conn, window, atoms.wm_window_role, xcb.ATOM_STRING)) |result| {
+        defer std.c.free(result.reply);
+        return allocator.dupe(u8, result.data) catch "";
+    }
+    return "";
+}
+
 /// Check _NET_WM_WINDOW_TYPE for dialog/splash/notification types.
 fn shouldFloatByType(conn: *xcb.Connection, window: xcb.Window, atoms: atoms_mod.Atoms) bool {
     const cookie = xcb.getProperty(conn, 0, window, atoms.net_wm_window_type, xcb.ATOM_ATOM, 0, 32);
@@ -531,7 +558,7 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     const window = ev.window;
 
     // Check if already managed
-    if (findContainerByWindow(ctx.tree_root, window) != null) {
+    if (findContainerByWindow(ctx,window) != null) {
         _ = xcb.mapWindow(ctx.conn, window);
         return;
     }
@@ -554,6 +581,7 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     const title = readTitle(ctx.allocator, ctx.conn, window, ctx.atoms);
     const transient = readTransientFor(ctx.conn, window);
     const win_type = readWindowTypeName(ctx.allocator, ctx.conn, window, ctx.atoms);
+    const win_role = readWindowRole(ctx.allocator, ctx.conn, window, ctx.atoms);
     var should_float = transient != null;
     if (!should_float) {
         should_float = shouldFloatByType(ctx.conn, window, ctx.atoms);
@@ -565,9 +593,13 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
         .instance = wm_class.instance,
         .title = title,
         .window_type = win_type,
+        .window_role = win_role,
         .transient_for = transient,
     };
     con.is_floating = should_float;
+
+    // Register in window lookup map
+    registerWindow(ctx, window, con);
 
     // Determine target workspace
     var target_ws = getFocusedWorkspace(ctx.tree_root);
@@ -673,7 +705,7 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
     // When ev.event == ev.window, it's StructureNotify on the window itself.
     if (ev.event == ev.window) return;
 
-    const con = findContainerByWindow(ctx.tree_root, ev.window) orelse return;
+    const con = findContainerByWindow(ctx,ev.window) orelse return;
 
     // Check if this unmap was WM-initiated (e.g. hiding windows in tabbed/stacked mode
     // or switching workspaces). If so, decrement counter and ignore.
@@ -696,7 +728,8 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
         }
     }
 
-    // destroy() handles freeing WindowData strings — do not call freeWindowStrings separately
+    // Unregister from window lookup and destroy
+    unregisterWindow(ctx, ev.window);
     con.unlink();
     con.destroy(ctx.allocator);
 
@@ -708,7 +741,7 @@ fn handleDestroyNotify(ctx: *EventContext, ev: *xcb.DestroyNotifyEvent) void {
     // Only process SubstructureNotify events (from root window).
     if (ev.event == ev.window) return;
 
-    const con = findContainerByWindow(ctx.tree_root, ev.window) orelse return;
+    const con = findContainerByWindow(ctx,ev.window) orelse return;
 
     if (con.is_focused) {
         const new_focus = con.next orelse con.prev orelse con.parent;
@@ -719,7 +752,7 @@ fn handleDestroyNotify(ctx: *EventContext, ev: *xcb.DestroyNotifyEvent) void {
         }
     }
 
-    // destroy() handles freeing WindowData strings — do not call freeWindowStrings separately
+    unregisterWindow(ctx, ev.window);
     con.unlink();
     con.destroy(ctx.allocator);
 
@@ -772,13 +805,13 @@ fn keysymToName(keysym: xcb.Keysym, buf: *[64]u8) ?[]const u8 {
 fn handleEnterNotify(ctx: *EventContext, ev: *xcb.EnterNotifyEvent) void {
     if (!ctx.focus_follows_mouse) return;
 
-    const con = findContainerByWindow(ctx.tree_root, ev.event) orelse return;
+    const con = findContainerByWindow(ctx,ev.event) orelse return;
     setFocus(ctx, con);
     _ = xcb.flush(ctx.conn);
 }
 
 fn handleButtonPress(ctx: *EventContext, ev: *xcb.ButtonPressEvent) void {
-    const con = findContainerByWindow(ctx.tree_root, ev.event) orelse return;
+    const con = findContainerByWindow(ctx,ev.event) orelse return;
     setFocus(ctx, con);
 
     // Allow the click to pass through to the application
@@ -787,7 +820,7 @@ fn handleButtonPress(ctx: *EventContext, ev: *xcb.ButtonPressEvent) void {
 }
 
 fn handleConfigureRequest(ctx: *EventContext, ev: *xcb.ConfigureRequestEvent) void {
-    const con = findContainerByWindow(ctx.tree_root, ev.window);
+    const con = findContainerByWindow(ctx,ev.window);
 
     const should_forward = if (con) |c| c.is_floating else true;
     if (con) |c| {
@@ -866,7 +899,7 @@ fn sendConfigureNotify(ctx: *EventContext, con: *tree.Container) void {
 }
 
 fn handlePropertyNotify(ctx: *EventContext, ev: *xcb.PropertyNotifyEvent) void {
-    const con = findContainerByWindow(ctx.tree_root, ev.window) orelse return;
+    const con = findContainerByWindow(ctx,ev.window) orelse return;
 
     // Update title
     if (ev.atom == ctx.atoms.net_wm_name or ev.atom == xcb.ATOM_WM_NAME) {
@@ -902,7 +935,7 @@ fn handlePropertyNotify(ctx: *EventContext, ev: *xcb.PropertyNotifyEvent) void {
 fn handleClientMessage(ctx: *EventContext, ev: *xcb.ClientMessageEvent) void {
     // _NET_ACTIVE_WINDOW: focus request
     if (ev.type == ctx.atoms.net_active_window) {
-        const con = findContainerByWindow(ctx.tree_root, ev.window) orelse return;
+        const con = findContainerByWindow(ctx,ev.window) orelse return;
         setFocus(ctx, con);
         relayoutAndRender(ctx);
         return;
@@ -910,14 +943,14 @@ fn handleClientMessage(ctx: *EventContext, ev: *xcb.ClientMessageEvent) void {
 
     // _NET_CLOSE_WINDOW: close request
     if (ev.type == ctx.atoms.net_close_window) {
-        const con = findContainerByWindow(ctx.tree_root, ev.window) orelse return;
+        const con = findContainerByWindow(ctx,ev.window) orelse return;
         killWindow(ctx, con, false);
         return;
     }
 
     // _NET_WM_STATE: fullscreen toggle etc.
     if (ev.type == ctx.atoms.net_wm_state) {
-        const con = findContainerByWindow(ctx.tree_root, ev.window) orelse return;
+        const con = findContainerByWindow(ctx,ev.window) orelse return;
         const action = ev.data.data32[0];
         const prop = ev.data.data32[1];
 
@@ -942,7 +975,7 @@ fn handleFocusIn(ctx: *EventContext, ev: *xcb.FocusInEvent) void {
     const window = ev.event;
 
     // If this window is managed by us, nothing to do
-    if (findContainerByWindow(ctx.tree_root, window) != null) return;
+    if (findContainerByWindow(ctx,window) != null) return;
 
     // An unmanaged window got focus — re-set focus to our focused container
     const focused = getFocusedContainer(ctx.tree_root) orelse return;
@@ -1248,8 +1281,8 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
         }
         if (ws == null) {
             ws = workspace.create(ctx.allocator, name, num) catch return;
-            // Attach to first output
-            if (getFirstOutput(ctx.tree_root)) |out| {
+            // Attach to focused output (or first output as fallback)
+            if (getFocusedOutput(ctx.tree_root)) |out| {
                 out.appendChild(ws.?);
                 ws.?.rect = out.rect;
             }
@@ -1260,7 +1293,7 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
         // Unfocus current workspace
         if (getFocusedWorkspace(ctx.tree_root)) |current_ws| {
             if (current_ws == target_ws) return; // already on this workspace
-            clearFocusRecursive(current_ws);
+            clearFocusedPath(current_ws);
         }
 
         // Focus new workspace
@@ -1378,12 +1411,8 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 extern "c" fn setsid() std.c.pid_t;
 
 fn executeExec(cmd: command_mod.Command) void {
-    const shell_cmd = cmd.args[0] orelse return;
-    // Strip --no-startup-id prefix if present
-    var actual_cmd = shell_cmd;
-    if (std.mem.startsWith(u8, actual_cmd, "--no-startup-id ")) {
-        actual_cmd = actual_cmd["--no-startup-id ".len..];
-    }
+    const actual_cmd = cmd.args[0] orelse return;
+    // --no-startup-id is stripped at parse time in command.zig
 
     // We need a null-terminated copy of the command
     var cmd_buf: [4096]u8 = undefined;

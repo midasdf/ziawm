@@ -58,6 +58,20 @@ fn handleIpcMessage(ctx: *event.EventContext, client_fd: std.posix.fd_t, msg_typ
 }
 
 /// Build JSON for GET_WORKSPACES response.
+/// Check if a workspace is the visible (focused) workspace on its output.
+fn isVisibleWorkspace(ws: *tree.Container, output_con: *tree.Container) bool {
+    // The visible workspace is the one with is_focused set, or the first workspace if none is focused
+    var first_ws: ?*tree.Container = null;
+    var cur = output_con.children.first;
+    while (cur) |child| : (cur = child.next) {
+        if (child.type != .workspace) continue;
+        if (first_ws == null) first_ws = child;
+        if (child.is_focused) return child == ws;
+    }
+    // No focused workspace — first workspace is visible
+    return if (first_ws) |fw| fw == ws else false;
+}
+
 fn buildWorkspacesJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
     var fbs = std.io.fixedBufferStream(buf);
     const w = fbs.writer();
@@ -75,7 +89,8 @@ fn buildWorkspacesJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
 
             const name = if (ws.workspace) |wsd| wsd.name else "?";
             const num: i32 = if (ws.workspace) |wsd| (wsd.num orelse 0) else 0;
-            const visible = ws.is_focused or (ws.children.first != null);
+            // A workspace is "visible" if it's the focused workspace on its output
+            const visible = isVisibleWorkspace(ws, out_con);
             const focused = ws.is_focused;
             // Check urgency on any child window
             var urgent = false;
@@ -125,6 +140,7 @@ fn buildOutputsJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
     w.writeByte('[') catch return "[]";
 
     var first = true;
+    var is_primary = true;
     var out_cur = ctx.tree_root.children.first;
     while (out_cur) |out_con| : (out_cur = out_con.next) {
         if (out_con.type != .output) continue;
@@ -153,14 +169,11 @@ fn buildOutputsJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
         const out_name = if (out_con.workspace) |wsd| wsd.output_name else "default";
         const display_name = if (out_name.len > 0) out_name else "default";
 
-        const is_primary = first; // first output is primary
-        _ = is_primary;
-
         std.fmt.format(w,
             "{{\"name\":\"{s}\",\"active\":true,\"primary\":{},\"rect\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}},\"current_workspace\":\"",
             .{
                 display_name,
-                out_cur == ctx.tree_root.children.first, // first output = primary
+                is_primary,
                 out_con.rect.x,
                 out_con.rect.y,
                 out_con.rect.w,
@@ -178,6 +191,7 @@ fn buildOutputsJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
             }
         }
         w.writeAll("\"}}") catch return "[]";
+        is_primary = false;
     }
 
     // If no outputs in tree, return a single default entry
@@ -726,18 +740,22 @@ pub fn main() !void {
                 // Check if this is an IPC client fd
                 for (&ipc_client_fds) |*slot| {
                     if (slot.* == ev.data.fd) {
-                        var msg_buf: [4096]u8 = undefined;
-                        const msg_result = ipc.readMessage(ev.data.fd, &msg_buf) catch {
-                            // WouldBlock: no data yet, try again later
-                            break :blk;
-                        };
-                        if (msg_result) |msg| {
-                            handleIpcMessage(&ctx, ev.data.fd, msg.msg_type, msg.payload);
-                        } else {
-                            // Client disconnected (EOF)
-                            _ = linux.epoll_ctl(@intCast(epoll_fd), linux.EPOLL.CTL_DEL, @intCast(ev.data.fd), null);
-                            std.posix.close(ev.data.fd);
-                            slot.* = -1;
+                        // Process all available messages (handles back-to-back sends)
+                        while (true) {
+                            var msg_buf: [4096]u8 = undefined;
+                            const msg_result = ipc.readMessage(ev.data.fd, &msg_buf) catch {
+                                // WouldBlock: no more data available
+                                break;
+                            };
+                            if (msg_result) |msg| {
+                                handleIpcMessage(&ctx, ev.data.fd, msg.msg_type, msg.payload);
+                            } else {
+                                // Client disconnected (EOF)
+                                _ = linux.epoll_ctl(@intCast(epoll_fd), linux.EPOLL.CTL_DEL, @intCast(ev.data.fd), null);
+                                std.posix.close(ev.data.fd);
+                                slot.* = -1;
+                                break;
+                            }
                         }
                         break :blk;
                     }
@@ -811,6 +829,7 @@ pub fn main() !void {
     }
 
     // Free static buffers
+    ctx.window_map.deinit(allocator);
     tree_json_buf.deinit(allocator);
 
     std.debug.print("zephwm shutting down\n", .{});

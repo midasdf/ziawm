@@ -166,9 +166,10 @@ pub const Container = struct {
             freeOwnedString(alloc, wd.window_role);
             freeOwnedString(alloc, wd.window_type);
         }
-        // Free allocator-owned workspace name
+        // Free allocator-owned workspace/output name strings
         if (self.workspace) |wsd| {
             freeOwnedString(alloc, wsd.name);
+            freeOwnedString(alloc, wsd.output_name);
         }
         // Free allocator-owned mark strings
         for (self.marks[0..self.mark_count]) |mark_opt| {

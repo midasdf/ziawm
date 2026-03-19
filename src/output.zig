@@ -46,9 +46,10 @@ pub fn detectOutputs(
             };
             // Store output name in workspace data (reusing WorkspaceData for output_name)
             const name = try allocator.dupe(u8, info.nameSlice());
+            const out_name = try allocator.dupe(u8, info.nameSlice());
             output_con.workspace = tree.WorkspaceData{
                 .name = name,
-                .output_name = name,
+                .output_name = out_name,
             };
             tree_root.appendChild(output_con);
 
@@ -73,9 +74,10 @@ pub fn detectOutputs(
             .h = screen.height_in_pixels,
         };
         const name = try allocator.dupe(u8, "default");
+        const out_name = try allocator.dupe(u8, "default");
         output_con.workspace = tree.WorkspaceData{
             .name = name,
-            .output_name = name,
+            .output_name = out_name,
         };
         tree_root.appendChild(output_con);
 
@@ -234,9 +236,10 @@ pub fn updateOutputs(
             const output_con = try tree.Container.create(allocator, .output);
             output_con.rect = .{ .x = info.x, .y = info.y, .w = info.w, .h = info.h };
             const owned_name = try allocator.dupe(u8, name);
+            const owned_out_name = try allocator.dupe(u8, name);
             output_con.workspace = tree.WorkspaceData{
                 .name = owned_name,
-                .output_name = owned_name,
+                .output_name = owned_out_name,
             };
             output_con.dirty = false;
             tree_root.appendChild(output_con);

@@ -177,9 +177,13 @@ pub fn parse(input: []const u8) ?Command {
         return Command{ .type = .kill, .args = .{ "graceful", null, null, null }, .criteria = crit };
     }
 
-    // "exec CMD"
+    // "exec [--no-startup-id] CMD"
     if (startsWith(u8, s, "exec ")) {
-        const rest = trimLeft(s["exec ".len..]);
+        var rest = trimLeft(s["exec ".len..]);
+        // Strip --no-startup-id at parse time
+        if (startsWith(u8, rest, "--no-startup-id ")) {
+            rest = trimLeft(rest["--no-startup-id ".len..]);
+        }
         if (rest.len == 0) return null;
         return Command{ .type = .exec, .args = .{ rest, null, null, null }, .criteria = crit };
     }

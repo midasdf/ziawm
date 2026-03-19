@@ -143,8 +143,21 @@ pub fn matches(crit: *const Criteria, con: *const tree.Container) bool {
         if (con.is_floating != want_floating) return false;
     }
 
-    // workspace: skip for now (needs tree walking)
-    _ = crit.workspace;
+    if (crit.workspace) |ws_pat| {
+        // Walk up to find the workspace ancestor
+        var p: ?*const tree.Container = con;
+        var found = false;
+        while (p) |cur| {
+            if (cur.type == .workspace) {
+                if (cur.workspace) |wsd| {
+                    found = globMatch(ws_pat, wsd.name);
+                }
+                break;
+            }
+            p = cur.parent;
+        }
+        if (!found) return false;
+    }
 
     return true;
 }
