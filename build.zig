@@ -90,6 +90,16 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Config module (pure Zig, depends on criteria which depends on tree)
+    const config_mod = b.createModule(.{
+        .root_source_file = b.path("src/config.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "criteria", .module = criteria_mod },
+        },
+    });
+
     // --- Test step ---
     const test_step = b.step("test", "Run tests");
 
@@ -136,6 +146,20 @@ pub fn build(b: *std.Build) void {
     });
     const run_layout_tests = b.addRunArtifact(layout_tests);
     test_step.dependOn(&run_layout_tests.step);
+
+    // config tests
+    const config_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_config.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "config", .module = config_mod },
+            },
+        }),
+    });
+    const run_config_tests = b.addRunArtifact(config_tests);
+    test_step.dependOn(&run_config_tests.step);
 
     // ipc tests
     const ipc_tests = b.addTest(.{
