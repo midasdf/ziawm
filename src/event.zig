@@ -914,10 +914,20 @@ fn handleClientMessage(ctx: *EventContext, ev: *xcb.ClientMessageEvent) void {
 }
 
 fn handleFocusIn(ctx: *EventContext, ev: *xcb.FocusInEvent) void {
-    // Validate that the focused window matches our tree state
-    _ = ctx;
-    _ = ev;
-    // TODO: re-set focus if it was stolen by an unmanaged window
+    // If an unmanaged window stole focus, re-set focus to our tracked focused window.
+    // Only handle NotifyNormal and NotifyWhileGrabbed to avoid loops.
+    if (ev.mode != 0 and ev.mode != 1) return; // NotifyNormal=0, NotifyWhileGrabbed=1
+
+    const window = ev.event;
+
+    // If this window is managed by us, nothing to do
+    if (findContainerByWindow(ctx.tree_root, window) != null) return;
+
+    // An unmanaged window got focus — re-set focus to our focused container
+    const focused = getFocusedContainer(ctx.tree_root) orelse return;
+    if (focused.window) |wd| {
+        _ = xcb.setInputFocus(ctx.conn, xcb.INPUT_FOCUS_POINTER_ROOT, wd.id, xcb.CURRENT_TIME);
+    }
 }
 
 fn handleMappingNotify(ctx: *EventContext, _: *xcb.GenericEvent) void {
@@ -952,13 +962,11 @@ pub fn executeCommand(ctx: *EventContext, cmd: command_mod.Command) void {
         .scratchpad => executeScratchpad(ctx, cmd),
         .mode => executeMode(ctx, cmd),
         .reload => executeReload(ctx),
-        .restart => {
-            std.debug.print("zephwm: restart not yet implemented\n", .{});
-        },
+        .restart => executeRestart(),
         .exit => {
             ctx.running.* = false;
         },
-        .resize => {}, // TODO
+        .resize => executeResize(ctx, cmd),
         .focus_output => executeFocusOutput(ctx, cmd),
         .nop => {},
     }
@@ -1413,6 +1421,76 @@ fn executeScratchpad(ctx: *EventContext, cmd: command_mod.Command) void {
     }
 }
 
+fn executeResize(ctx: *EventContext, cmd: command_mod.Command) void {
+    // resize grow/shrink width/height N [px|ppt]
+    const direction = cmd.args[0] orelse return; // "grow" or "shrink"
+    const dimension = cmd.args[1] orelse return; // "width" or "height"
+    const amount_str = cmd.args[2] orelse return; // "10" etc.
+
+    const amount = std.fmt.parseInt(i32, amount_str, 10) catch return;
+    if (amount <= 0) return;
+
+    const focused = getFocusedContainer(ctx.tree_root) orelse return;
+    const parent = focused.parent orelse return;
+
+    // Determine if resizing is valid for the parent's layout
+    const is_grow = std.mem.eql(u8, direction, "grow");
+    const is_width = std.mem.eql(u8, dimension, "width") or std.mem.eql(u8, dimension, "w");
+
+    // Width resize only makes sense in hsplit, height in vsplit
+    const target_layout: tree.Layout = if (is_width) .hsplit else .vsplit;
+
+    // Walk up to find a parent with the matching layout
+    var target_parent: ?*tree.Container = null;
+    var resize_child: *tree.Container = focused;
+    var cur_parent: ?*tree.Container = parent;
+    while (cur_parent) |p| {
+        if (p.type == .root or p.type == .output) break;
+        if (p.layout == target_layout and p.tilingChildCount() > 1) {
+            target_parent = p;
+            break;
+        }
+        resize_child = p;
+        cur_parent = p.parent;
+    }
+
+    const tp = target_parent orelse return;
+
+    // Calculate the total size of the parent in the relevant dimension
+    const total: u32 = if (is_width) tp.rect.w else tp.rect.h;
+    if (total == 0) return;
+
+    // Calculate percent delta
+    const delta: f32 = @as(f32, @floatFromInt(amount)) / @as(f32, @floatFromInt(total));
+    const sign: f32 = if (is_grow) delta else -delta;
+
+    // Adjust percent of the resize_child
+    if (resize_child.percent <= 0.0) {
+        // Initialize percent based on equal distribution
+        const n = tp.tilingChildCount();
+        if (n == 0) return;
+        resize_child.percent = 1.0 / @as(f32, @floatFromInt(n));
+    }
+    resize_child.percent += sign;
+
+    // Clamp to reasonable range
+    if (resize_child.percent < 0.05) resize_child.percent = 0.05;
+    if (resize_child.percent > 0.95) resize_child.percent = 0.95;
+
+    // Find a sibling to absorb the change (next sibling, or prev)
+    const sibling = resize_child.next orelse resize_child.prev orelse return;
+    if (sibling.percent <= 0.0) {
+        const n = tp.tilingChildCount();
+        if (n == 0) return;
+        sibling.percent = 1.0 / @as(f32, @floatFromInt(n));
+    }
+    sibling.percent -= sign;
+    if (sibling.percent < 0.05) sibling.percent = 0.05;
+    if (sibling.percent > 0.95) sibling.percent = 0.95;
+
+    relayoutAndRender(ctx);
+}
+
 fn executeFocusOutput(ctx: *EventContext, cmd: command_mod.Command) void {
     const arg = cmd.args[0] orelse return;
 
@@ -1465,6 +1543,28 @@ fn executeReload(_: *EventContext) void {
     // Send SIGUSR1 to self to trigger config reload via the signalfd handler in main.zig
     const linux = std.os.linux;
     _ = linux.kill(linux.getpid(), linux.SIG.USR1);
+}
+
+pub fn executeRestart() void {
+    // Re-exec ourselves. This preserves the X connection and managed windows
+    // because the new process inherits file descriptors.
+    std.debug.print("zephwm: restarting via execvp\n", .{});
+
+    // Read /proc/self/exe to get our binary path
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe_path = std.fs.readLinkAbsolute("/proc/self/exe", &exe_buf) catch {
+        std.debug.print("zephwm: restart failed: cannot read /proc/self/exe\n", .{});
+        return;
+    };
+    // Null-terminate for execvp
+    if (exe_path.len >= exe_buf.len) return;
+    exe_buf[exe_path.len] = 0;
+    const exe_z: [*:0]const u8 = @ptrCast(exe_buf[0..exe_path.len :0]);
+
+    const argv = [_:null]?[*:0]const u8{exe_z};
+    _ = execvp(exe_z, &argv);
+    // If execvp returns, it failed
+    std.debug.print("zephwm: restart execvp failed\n", .{});
 }
 
 fn executeMode(ctx: *EventContext, cmd: command_mod.Command) void {

@@ -9,6 +9,7 @@ const render = @import("render.zig");
 const ipc = @import("ipc.zig");
 const config_mod = @import("config.zig");
 const command_mod = @import("command.zig");
+const bar = @import("bar.zig");
 const linux = std.os.linux;
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -653,7 +654,14 @@ pub fn main() !void {
         }
     }
 
-    // 11a. Set initial EWMH properties
+    // 11a. Spawn bar if configured
+    if (config) |cfg| {
+        if (cfg.bar.status_command.len > 0) {
+            bar.spawnBar(cfg.bar.status_command, cfg.bar.position);
+        }
+    }
+
+    // 11b. Set initial EWMH properties
     event.updateClientList(&ctx);
     event.updateNumberOfDesktops(&ctx);
     event.updateCurrentDesktop(&ctx);
@@ -757,7 +765,9 @@ pub fn main() !void {
                             running = false;
                         },
                         linux.SIG.HUP => {
-                            // TODO: full restart. For now, just exit.
+                            // Restart via re-exec (same as "restart" command)
+                            event.executeRestart();
+                            // If re-exec failed, just exit
                             running = false;
                         },
                         linux.SIG.USR1 => {
