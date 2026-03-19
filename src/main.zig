@@ -119,7 +119,11 @@ fn buildWorkspacesJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
 
 /// Build JSON for GET_TREE response.
 /// Uses a dynamic ArrayList(u8) since tree JSON can exceed 8KB for large trees.
+/// Note: returns a slice backed by a static buffer that is reused on each call.
+/// The caller must consume the result before the next call to buildTreeJson.
 fn buildTreeJson(ctx: *event.EventContext, _: *[8192]u8) []const u8 {
+    // Use a static buffer with retained capacity to avoid repeated allocation.
+    // This is safe because IPC message handling is single-threaded and non-reentrant.
     const S = struct {
         var tree_buf: std.ArrayListUnmanaged(u8) = .empty;
     };

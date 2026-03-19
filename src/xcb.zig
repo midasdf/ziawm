@@ -40,6 +40,7 @@ pub const MapRequestEvent = c.xcb_map_request_event_t;
 pub const UnmapNotifyEvent = c.xcb_unmap_notify_event_t;
 pub const DestroyNotifyEvent = c.xcb_destroy_notify_event_t;
 pub const KeyPressEvent = c.xcb_key_press_event_t;
+pub const ButtonPressEvent = c.xcb_button_press_event_t;
 pub const EnterNotifyEvent = c.xcb_enter_notify_event_t;
 pub const ConfigureRequestEvent = c.xcb_configure_request_event_t;
 pub const PropertyNotifyEvent = c.xcb_property_notify_event_t;
@@ -88,6 +89,7 @@ pub const CLIENT_MESSAGE: u8 = c.XCB_CLIENT_MESSAGE;
 pub const CONFIGURE_NOTIFY: u8 = c.XCB_CONFIGURE_NOTIFY;
 pub const FOCUS_IN: u8 = c.XCB_FOCUS_IN;
 pub const MAPPING_NOTIFY: u8 = c.XCB_MAPPING_NOTIFY;
+pub const BUTTON_PRESS: u8 = c.XCB_BUTTON_PRESS;
 
 // Configure window value masks
 pub const CONFIG_WINDOW_X: u16 = c.XCB_CONFIG_WINDOW_X;
@@ -150,6 +152,8 @@ pub const MOD_MASK_4: u16 = c.XCB_MOD_MASK_4; // Super
 pub const MOD_MASK_5: u16 = c.XCB_MOD_MASK_5;
 pub const MOD_MASK_ANY: u16 = c.XCB_MOD_MASK_ANY;
 pub const GRAB_ANY: u8 = c.XCB_GRAB_ANY;
+pub const BUTTON_INDEX_ANY: u8 = c.XCB_BUTTON_INDEX_ANY;
+pub const BUTTON_INDEX_1: u8 = 1;
 
 // RandR connection
 pub const RANDR_CONNECTION_CONNECTED: u32 = c.XCB_RANDR_CONNECTION_CONNECTED;
@@ -304,6 +308,15 @@ pub fn grabKey(conn: *Connection, owner_events: u8, grab_window: Window, modifie
 
 pub fn ungrabKey(conn: *Connection, key: Keycode, grab_window: Window, modifiers: u16) VoidCookie {
     return c.xcb_ungrab_key(conn, key, grab_window, modifiers);
+}
+
+// --- Button grabbing ---
+pub fn grabButton(conn: *Connection, owner_events: u8, grab_window: Window, event_mask: u16, pointer_mode: u8, keyboard_mode: u8, confine_to: Window, cursor: u32, button: u8, modifiers: u16) VoidCookie {
+    return c.xcb_grab_button(conn, owner_events, grab_window, event_mask, pointer_mode, keyboard_mode, confine_to, cursor, button, modifiers);
+}
+
+pub fn ungrabButton(conn: *Connection, button: u8, grab_window: Window, modifiers: u16) VoidCookie {
+    return c.xcb_ungrab_button(conn, button, grab_window, modifiers);
 }
 
 // --- Key symbols ---

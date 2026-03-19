@@ -139,6 +139,8 @@ pub const Container = struct {
     }
 
     /// Recursively destroy this container and all its children.
+    /// This frees all allocator-owned strings (WindowData, WorkspaceData).
+    /// Callers must NOT free strings separately before calling destroy().
     /// The container pointer is freed by the allocator; do not use it after this call.
     pub fn destroy(self: *Container, alloc: Allocator) void {
         // Destroy children depth-first before freeing self.

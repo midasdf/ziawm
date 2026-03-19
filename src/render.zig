@@ -3,16 +3,46 @@ const xcb = @import("xcb.zig");
 const tree = @import("tree.zig");
 
 /// Walk the container tree and apply geometry to X11 windows.
-/// Configures window position/size via xcb and sets border colors
-/// based on focus state.
+/// Only the focused (visible) workspace per output is rendered;
+/// windows on other workspaces are unmapped.
 pub fn applyTree(
     conn: *xcb.Connection,
     root: *tree.Container,
     border_focus_color: u32,
     border_unfocus_color: u32,
 ) void {
-    applyRecursive(conn, root, border_focus_color, border_unfocus_color);
+    // Iterate over outputs
+    var out_cur = root.children.first;
+    while (out_cur) |output_con| : (out_cur = output_con.next) {
+        if (output_con.type != .output) continue;
+
+        // Find the visible (focused) workspace for this output
+        const visible_ws = getVisibleWorkspace(output_con);
+
+        // Iterate workspaces: render visible, unmap others
+        var ws_cur = output_con.children.first;
+        while (ws_cur) |ws| : (ws_cur = ws.next) {
+            if (ws.type != .workspace) continue;
+            if (visible_ws != null and ws == visible_ws.?) {
+                applyRecursive(conn, ws, border_focus_color, border_unfocus_color);
+            } else {
+                unmapSubtree(conn, ws);
+            }
+        }
+    }
     _ = xcb.flush(conn);
+}
+
+/// Find the focused workspace under an output. Falls back to first workspace.
+fn getVisibleWorkspace(output_con: *tree.Container) ?*tree.Container {
+    var first_ws: ?*tree.Container = null;
+    var cur = output_con.children.first;
+    while (cur) |child| : (cur = child.next) {
+        if (child.type != .workspace) continue;
+        if (first_ws == null) first_ws = child;
+        if (child.is_focused) return child;
+    }
+    return first_ws;
 }
 
 fn applyRecursive(
@@ -52,6 +82,14 @@ fn applyRecursive(
                 if (!child.is_floating) continue;
                 applyRecursive(conn, child, border_focus_color, border_unfocus_color);
             }
+
+            // Third pass: fullscreen children rendered last (on top of everything)
+            cur = con.children.first;
+            while (cur) |child| : (cur = child.next) {
+                if (child.is_fullscreen != .none) {
+                    applyFullscreen(conn, child, con);
+                }
+            }
         },
     }
 }
@@ -63,6 +101,10 @@ fn applyWindow(
     border_unfocus_color: u32,
 ) void {
     const win_data = con.window orelse return;
+
+    // Fullscreen windows are handled separately by applyFullscreen
+    if (con.is_fullscreen != .none) return;
+
     const r = con.window_rect;
 
     // Configure window geometry
@@ -82,6 +124,30 @@ fn applyWindow(
     _ = xcb.changeWindowAttributes(conn, win_data.id, xcb.CW_BORDER_PIXEL, &border_values);
 
     // Ensure the window is mapped
+    _ = xcb.mapWindow(conn, win_data.id);
+}
+
+/// Render a fullscreen window: fill entire output, no border, raise above all.
+fn applyFullscreen(conn: *xcb.Connection, con: *tree.Container, parent_con: *tree.Container) void {
+    const win_data = con.window orelse return;
+
+    // Use parent's rect (output or workspace rect) for fullscreen
+    const r = parent_con.rect;
+
+    // Configure: position, size, border=0, raise to top
+    const values = [_]u32{
+        @bitCast(r.x),
+        @bitCast(r.y),
+        r.w,
+        r.h,
+        0, // border_width = 0
+        xcb.STACK_MODE_ABOVE,
+    };
+    const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+        xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT |
+        xcb.CONFIG_WINDOW_BORDER_WIDTH | xcb.CONFIG_WINDOW_STACK_MODE;
+    _ = xcb.configureWindow(conn, win_data.id, mask, &values);
+
     _ = xcb.mapWindow(conn, win_data.id);
 }
 
@@ -118,7 +184,7 @@ fn isFirstTilingChild(con: *tree.Container, child: *tree.Container) bool {
 }
 
 /// Unmap all windows in a subtree.
-fn unmapSubtree(conn: *xcb.Connection, con: *tree.Container) void {
+pub fn unmapSubtree(conn: *xcb.Connection, con: *tree.Container) void {
     if (con.type == .window) {
         if (con.window) |win_data| {
             _ = xcb.unmapWindow(conn, win_data.id);

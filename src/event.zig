@@ -39,6 +39,7 @@ pub fn handleEvent(ctx: *EventContext, event: *xcb.GenericEvent) void {
         xcb.CONFIGURE_REQUEST => handleConfigureRequest(ctx, @ptrCast(event)),
         xcb.PROPERTY_NOTIFY => handlePropertyNotify(ctx, @ptrCast(event)),
         xcb.CLIENT_MESSAGE => handleClientMessage(ctx, @ptrCast(event)),
+        xcb.BUTTON_PRESS => handleButtonPress(ctx, @ptrCast(event)),
         xcb.FOCUS_IN => handleFocusIn(ctx, @ptrCast(event)),
         xcb.MAPPING_NOTIFY => handleMappingNotify(ctx, event),
         else => {}, // Ignore unhandled events
@@ -512,6 +513,20 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     };
     _ = xcb.changeWindowAttributes(ctx.conn, window, xcb.CW_EVENT_MASK, &event_mask);
 
+    // Grab Button1 for click-to-focus
+    _ = xcb.grabButton(
+        ctx.conn,
+        0, // owner_events: false so we get the event
+        window,
+        xcb.EVENT_MASK_BUTTON_PRESS,
+        xcb.GRAB_MODE_ASYNC,
+        xcb.GRAB_MODE_ASYNC,
+        xcb.WINDOW_NONE,
+        xcb.NONE,
+        xcb.BUTTON_INDEX_1,
+        xcb.MOD_MASK_ANY,
+    );
+
     // Map the window
     _ = xcb.mapWindow(ctx.conn, window);
 
@@ -551,7 +566,7 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
         }
     }
 
-    freeWindowStrings(ctx.allocator, con);
+    // destroy() handles freeing WindowData strings — do not call freeWindowStrings separately
     con.unlink();
     con.destroy(ctx.allocator);
 
@@ -571,7 +586,7 @@ fn handleDestroyNotify(ctx: *EventContext, ev: *xcb.DestroyNotifyEvent) void {
         }
     }
 
-    freeWindowStrings(ctx.allocator, con);
+    // destroy() handles freeing WindowData strings — do not call freeWindowStrings separately
     con.unlink();
     con.destroy(ctx.allocator);
 
@@ -674,6 +689,15 @@ fn handleEnterNotify(ctx: *EventContext, ev: *xcb.EnterNotifyEvent) void {
 
     const con = findContainerByWindow(ctx.tree_root, ev.event) orelse return;
     setFocus(ctx, con);
+    _ = xcb.flush(ctx.conn);
+}
+
+fn handleButtonPress(ctx: *EventContext, ev: *xcb.ButtonPressEvent) void {
+    const con = findContainerByWindow(ctx.tree_root, ev.event) orelse return;
+    setFocus(ctx, con);
+
+    // Allow the click to pass through to the application
+    _ = xcb.c.xcb_allow_events(ctx.conn, xcb.c.XCB_ALLOW_REPLAY_POINTER, xcb.CURRENT_TIME);
     _ = xcb.flush(ctx.conn);
 }
 
@@ -863,9 +887,7 @@ pub fn executeCommand(ctx: *EventContext, cmd: command_mod.Command) void {
         .unmark => executeUnmark(ctx, cmd),
         .scratchpad => executeScratchpad(ctx, cmd),
         .mode => executeMode(ctx, cmd),
-        .reload => {
-            std.debug.print("ziawm: reload not yet implemented\n", .{});
-        },
+        .reload => executeReload(ctx),
         .restart => {
             std.debug.print("ziawm: restart not yet implemented\n", .{});
         },
@@ -883,12 +905,34 @@ fn executeSplit(ctx: *EventContext, cmd: command_mod.Command) void {
     const parent = focused.parent orelse return;
     const arg = cmd.args[0] orelse return;
 
-    if (std.mem.eql(u8, arg, "h") or std.mem.eql(u8, arg, "horizontal")) {
-        parent.layout = .hsplit;
-    } else if (std.mem.eql(u8, arg, "v") or std.mem.eql(u8, arg, "vertical")) {
-        parent.layout = .vsplit;
-    } else if (std.mem.eql(u8, arg, "toggle")) {
-        parent.layout = if (parent.layout == .hsplit) .vsplit else .hsplit;
+    const new_layout: tree.Layout = if (std.mem.eql(u8, arg, "h") or std.mem.eql(u8, arg, "horizontal"))
+        .hsplit
+    else if (std.mem.eql(u8, arg, "v") or std.mem.eql(u8, arg, "vertical"))
+        .vsplit
+    else if (std.mem.eql(u8, arg, "toggle"))
+        (if (parent.layout == .hsplit) tree.Layout.vsplit else tree.Layout.hsplit)
+    else
+        return;
+
+    // If focused is a window, wrap it in a new split_con with the requested layout.
+    // This is how i3 works: split creates an intermediate container around the focused window.
+    if (focused.type == .window) {
+        const split_con = tree.Container.create(ctx.allocator, .split_con) catch return;
+        split_con.layout = new_layout;
+        split_con.percent = focused.percent;
+
+        // Replace focused in parent with split_con (same position)
+        parent.insertBefore(split_con, focused);
+        focused.unlink();
+
+        // Move focused under the new split_con
+        split_con.appendChild(focused);
+        focused.percent = 0.0; // single child, no percent needed
+
+        setFocus(ctx, focused);
+    } else {
+        // If focused is already a container (split_con/workspace), just change its layout
+        focused.layout = new_layout;
     }
     relayoutAndRender(ctx);
 }
@@ -915,36 +959,18 @@ fn executeFocus(ctx: *EventContext, cmd: command_mod.Command) void {
     }
 
     // Directional focus: left/right/up/down
+    // The direction must match the parent's split orientation to navigate siblings.
+    // If it doesn't match, walk up the tree to find a container with matching orientation.
     const focused = getFocusedContainer(ctx.tree_root) orelse return;
-    const parent = focused.parent orelse return;
 
     if (std.mem.eql(u8, arg, "left") or std.mem.eql(u8, arg, "prev")) {
-        if (focused.prev) |prev| {
-            // Find deepest child of prev
-            setFocus(ctx, getDeepestChild(prev));
-        }
+        focusInDirection(ctx, focused, .hsplit, .prev);
     } else if (std.mem.eql(u8, arg, "right") or std.mem.eql(u8, arg, "next")) {
-        if (focused.next) |next| {
-            setFocus(ctx, getDeepestChild(next));
-        }
+        focusInDirection(ctx, focused, .hsplit, .next);
     } else if (std.mem.eql(u8, arg, "up")) {
-        if (parent.layout == .vsplit) {
-            if (focused.prev) |prev| {
-                setFocus(ctx, getDeepestChild(prev));
-            }
-        } else if (parent.parent) |gp| {
-            if (gp.type != .root) {
-                setFocus(ctx, parent);
-            }
-        }
+        focusInDirection(ctx, focused, .vsplit, .prev);
     } else if (std.mem.eql(u8, arg, "down")) {
-        if (parent.layout == .vsplit) {
-            if (focused.next) |next| {
-                setFocus(ctx, getDeepestChild(next));
-            }
-        } else if (focused.children.first) |child| {
-            setFocus(ctx, child);
-        }
+        focusInDirection(ctx, focused, .vsplit, .next);
     }
     _ = xcb.flush(ctx.conn);
 }
@@ -964,33 +990,85 @@ fn getDeepestChild(con: *tree.Container) *tree.Container {
     return c;
 }
 
+const Direction = enum { prev, next };
+
+/// Navigate focus in a spatial direction. `orientation` is the layout that matches
+/// the direction (hsplit for left/right, vsplit for up/down). `dir` is prev/next
+/// within that orientation.
+fn focusInDirection(ctx: *EventContext, focused: *tree.Container, orientation: tree.Layout, dir: Direction) void {
+    // Walk up from focused to find a parent with matching orientation
+    var con: *tree.Container = focused;
+    while (con.parent) |parent| {
+        if (parent.type == .root or parent.type == .output) break;
+        if (parent.layout == orientation) {
+            // Found matching orientation — navigate sibling
+            const sibling = switch (dir) {
+                .prev => con.prev,
+                .next => con.next,
+            };
+            if (sibling) |sib| {
+                setFocus(ctx, getDeepestChild(sib));
+                return;
+            }
+            // No sibling in that direction at this level — keep walking up
+        }
+        con = parent;
+    }
+}
+
 fn executeMove(ctx: *EventContext, cmd: command_mod.Command) void {
     const arg = cmd.args[0] orelse return;
     const focused = getFocusedContainer(ctx.tree_root) orelse return;
-    const parent = focused.parent orelse return;
 
-    if (std.mem.eql(u8, arg, "left") or std.mem.eql(u8, arg, "up")) {
-        // Move before previous sibling
-        if (focused.prev) |prev| {
-            parent.children.remove(focused);
-            parent.children.insertBefore(focused, prev);
-            focused.parent = parent;
-        }
-    } else if (std.mem.eql(u8, arg, "right") or std.mem.eql(u8, arg, "down")) {
-        // Move after next sibling
-        if (focused.next) |next| {
-            parent.children.remove(focused);
-            // Insert after next: if next has a next, insert before it; otherwise append
-            if (next.next) |after_next| {
-                parent.children.insertBefore(focused, after_next);
-                focused.parent = parent;
-            } else {
-                parent.children.append(focused);
-                focused.parent = parent;
-            }
-        }
+    if (std.mem.eql(u8, arg, "left")) {
+        moveInDirection(ctx, focused, .hsplit, .prev);
+    } else if (std.mem.eql(u8, arg, "right")) {
+        moveInDirection(ctx, focused, .hsplit, .next);
+    } else if (std.mem.eql(u8, arg, "up")) {
+        moveInDirection(ctx, focused, .vsplit, .prev);
+    } else if (std.mem.eql(u8, arg, "down")) {
+        moveInDirection(ctx, focused, .vsplit, .next);
     }
     relayoutAndRender(ctx);
+}
+
+/// Move a container in a spatial direction. If the parent's orientation matches,
+/// swap with sibling. If not, walk up to find a matching-orientation ancestor
+/// and reparent into the adjacent sibling there.
+fn moveInDirection(ctx: *EventContext, focused: *tree.Container, orientation: tree.Layout, dir: Direction) void {
+    _ = ctx;
+    var con: *tree.Container = focused;
+    while (con.parent) |parent| {
+        if (parent.type == .root or parent.type == .output) break;
+        if (parent.layout == orientation) {
+            const sibling = switch (dir) {
+                .prev => con.prev,
+                .next => con.next,
+            };
+            if (sibling) |sib| {
+                // Swap positions: remove focused and insert at sibling's position
+                parent.children.remove(focused);
+                switch (dir) {
+                    .prev => {
+                        parent.children.insertBefore(focused, sib);
+                        focused.parent = parent;
+                    },
+                    .next => {
+                        if (sib.next) |after| {
+                            parent.children.insertBefore(focused, after);
+                            focused.parent = parent;
+                        } else {
+                            parent.children.append(focused);
+                            focused.parent = parent;
+                        }
+                    },
+                }
+                return;
+            }
+            // No sibling at this level — keep walking up
+        }
+        con = parent;
+    }
 }
 
 fn executeLayout(ctx: *EventContext, cmd: command_mod.Command) void {
@@ -1255,6 +1333,12 @@ fn executeScratchpad(ctx: *EventContext, cmd: command_mod.Command) void {
 
 /// Static sentinel for the default mode — used for pointer comparison to detect ownership.
 pub const DEFAULT_MODE: []const u8 = "default";
+
+fn executeReload(_: *EventContext) void {
+    // Send SIGUSR1 to self to trigger config reload via the signalfd handler in main.zig
+    const linux = std.os.linux;
+    _ = linux.kill(linux.getpid(), linux.SIG.USR1);
+}
 
 fn executeMode(ctx: *EventContext, cmd: command_mod.Command) void {
     const mode_name = cmd.args[0] orelse return;
