@@ -98,6 +98,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/command.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "criteria.zig", .module = criteria_mod },
+        },
     });
 
     // Config module (pure Zig, depends on criteria which depends on tree)

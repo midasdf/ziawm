@@ -36,9 +36,10 @@ fn handleIpcMessage(ctx: *event.EventContext, client_fd: std.posix.fd_t, msg_typ
             if (payload.len > 0) {
                 if (command_mod.parse(payload)) |cmd| {
                     event.executeCommand(ctx, cmd);
+                    break :blk "[{\"success\":true}]";
                 }
             }
-            break :blk "[{\"success\":true}]";
+            break :blk "[{\"success\":false,\"error\":\"invalid command\"}]";
         },
         @intFromEnum(ipc.MessageType.get_workspaces) => buildWorkspacesJson(ctx, &dyn_buf),
         @intFromEnum(ipc.MessageType.get_outputs) => "[]",
@@ -87,9 +88,20 @@ fn buildWorkspacesJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
                 }
             }
 
-            std.fmt.format(w, "{{\"num\":{d},\"name\":\"{s}\",\"visible\":{},\"focused\":{},\"output\":\"default\",\"urgent\":{},\"rect\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}}}}", .{
-                num,
-                name,
+            std.fmt.format(w, "{{\"num\":{d},\"name\":\"", .{num}) catch return "[]";
+            // JSON-escape the workspace name
+            for (name) |ch| {
+                switch (ch) {
+                    '"' => w.writeAll("\\\"") catch return "[]",
+                    '\\' => w.writeAll("\\\\") catch return "[]",
+                    else => {
+                        if (ch >= 0x20) {
+                            w.writeByte(ch) catch return "[]";
+                        }
+                    },
+                }
+            }
+            std.fmt.format(w, "\",\"visible\":{},\"focused\":{},\"output\":\"default\",\"urgent\":{},\"rect\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}}}}", .{
                 visible,
                 focused,
                 urgent,
@@ -106,11 +118,14 @@ fn buildWorkspacesJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
 }
 
 /// Build JSON for GET_TREE response.
-fn buildTreeJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
-    var fbs = std.io.fixedBufferStream(buf);
-    const w = fbs.writer();
-    writeContainerJson(w, ctx.tree_root) catch return "{}";
-    return fbs.getWritten();
+/// Uses a dynamic ArrayList(u8) since tree JSON can exceed 8KB for large trees.
+fn buildTreeJson(ctx: *event.EventContext, _: *[8192]u8) []const u8 {
+    const S = struct {
+        var tree_buf: std.ArrayListUnmanaged(u8) = .empty;
+    };
+    S.tree_buf.clearRetainingCapacity();
+    writeContainerJson(S.tree_buf.writer(ctx.allocator), ctx.tree_root) catch return "{}";
+    return S.tree_buf.items;
 }
 
 fn writeContainerJson(w: anytype, con: *tree.Container) !void {
@@ -506,7 +521,9 @@ pub fn main() !void {
     // 11. Run exec commands from config
     if (config) |cfg| {
         for (cfg.exec_cmds.items) |exec_cmd| {
-            if (command_mod.parse(std.fmt.allocPrint(allocator, "exec {s}", .{exec_cmd}) catch continue)) |cmd| {
+            const cmd_str = std.fmt.allocPrint(allocator, "exec {s}", .{exec_cmd}) catch continue;
+            defer allocator.free(cmd_str);
+            if (command_mod.parse(cmd_str)) |cmd| {
                 event.executeCommand(&ctx, cmd);
             }
         }
@@ -561,7 +578,11 @@ pub fn main() !void {
                             .events = linux.EPOLL.IN,
                             .data = .{ .fd = client_fd },
                         };
-                        _ = linux.epoll_ctl(@intCast(epoll_fd), linux.EPOLL.CTL_ADD, @intCast(client_fd), &client_ev);
+                        const ctl_res = linux.epoll_ctl(@intCast(epoll_fd), linux.EPOLL.CTL_ADD, @intCast(client_fd), &client_ev);
+                        if (@as(isize, @bitCast(ctl_res)) < 0) {
+                            std.posix.close(client_fd);
+                            break;
+                        }
                         added = true;
                         break;
                     }
@@ -574,10 +595,14 @@ pub fn main() !void {
                 for (&ipc_client_fds) |*slot| {
                     if (slot.* == ev.data.fd) {
                         var msg_buf: [4096]u8 = undefined;
-                        if (ipc.readMessage(ev.data.fd, &msg_buf)) |msg| {
+                        const msg_result = ipc.readMessage(ev.data.fd, &msg_buf) catch {
+                            // WouldBlock: no data yet, try again later
+                            break :blk;
+                        };
+                        if (msg_result) |msg| {
                             handleIpcMessage(&ctx, ev.data.fd, msg.msg_type, msg.payload);
                         } else {
-                            // Client disconnected or error
+                            // Client disconnected (EOF)
                             _ = linux.epoll_ctl(@intCast(epoll_fd), linux.EPOLL.CTL_DEL, @intCast(ev.data.fd), null);
                             std.posix.close(ev.data.fd);
                             slot.* = -1;

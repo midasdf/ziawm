@@ -132,6 +132,12 @@ pub const Container = struct {
         return con;
     }
 
+    /// Free an allocator-owned string, but skip default empty string literals ("").
+    fn freeOwnedString(alloc: Allocator, s: []const u8) void {
+        if (s.len == 0) return;
+        alloc.free(s);
+    }
+
     /// Recursively destroy this container and all its children.
     /// The container pointer is freed by the allocator; do not use it after this call.
     pub fn destroy(self: *Container, alloc: Allocator) void {
@@ -141,6 +147,17 @@ pub const Container = struct {
             const next = child.next;
             child.destroy(alloc);
             cur = next;
+        }
+        // Free allocator-owned WindowData strings
+        if (self.window) |wd| {
+            freeOwnedString(alloc, wd.class);
+            freeOwnedString(alloc, wd.instance);
+            freeOwnedString(alloc, wd.title);
+            freeOwnedString(alloc, wd.window_role);
+        }
+        // Free allocator-owned workspace name
+        if (self.workspace) |wsd| {
+            freeOwnedString(alloc, wsd.name);
         }
         alloc.destroy(self);
     }

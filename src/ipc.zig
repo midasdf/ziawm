@@ -132,14 +132,18 @@ pub fn acceptClient(listen_fd: std.posix.fd_t) !std.posix.fd_t {
 }
 
 /// Read a complete message from client fd into buf.
-/// Returns msg_type + payload slice, or null if incomplete/error.
-pub fn readMessage(fd: std.posix.fd_t, buf: []u8) ?struct { msg_type: u32, payload: []const u8 } {
+/// Returns msg_type + payload slice, or null if EOF/disconnect.
+/// Returns error.WouldBlock if no data available yet (EAGAIN).
+pub fn readMessage(fd: std.posix.fd_t, buf: []u8) error{WouldBlock}!?struct { msg_type: u32, payload: []const u8 } {
     if (buf.len < HEADER_SIZE) return null;
 
     // Read header
     var total_read: usize = 0;
     while (total_read < HEADER_SIZE) {
-        const n = std.posix.read(fd, buf[total_read..]) catch return null;
+        const n = std.posix.read(fd, buf[total_read..]) catch |err| {
+            if (err == error.WouldBlock) return error.WouldBlock;
+            return null;
+        };
         if (n == 0) return null; // EOF
         total_read += n;
     }
@@ -153,7 +157,10 @@ pub fn readMessage(fd: std.posix.fd_t, buf: []u8) ?struct { msg_type: u32, paylo
 
     // Read payload
     while (total_read < total_needed) {
-        const n = std.posix.read(fd, buf[total_read..total_needed]) catch return null;
+        const n = std.posix.read(fd, buf[total_read..total_needed]) catch |err| {
+            if (err == error.WouldBlock) return error.WouldBlock;
+            return null;
+        };
         if (n == 0) return null;
         total_read += n;
     }
@@ -164,6 +171,16 @@ pub fn readMessage(fd: std.posix.fd_t, buf: []u8) ?struct { msg_type: u32, paylo
     };
 }
 
+/// Write all bytes to fd, handling partial writes.
+fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
+    var written: usize = 0;
+    while (written < data.len) {
+        const n = try std.posix.write(fd, data[written..]);
+        if (n == 0) return error.BrokenPipe;
+        written += n;
+    }
+}
+
 /// Write a response to client fd.
 pub fn writeResponse(fd: std.posix.fd_t, msg_type: u32, payload: []const u8) !void {
     // Write header
@@ -172,8 +189,8 @@ pub fn writeResponse(fd: std.posix.fd_t, msg_type: u32, payload: []const u8) !vo
     std.mem.writeInt(u32, hdr_buf[6..10], @intCast(payload.len), .little);
     std.mem.writeInt(u32, hdr_buf[10..14], msg_type, .little);
 
-    _ = try std.posix.write(fd, &hdr_buf);
+    try writeAll(fd, &hdr_buf);
     if (payload.len > 0) {
-        _ = try std.posix.write(fd, payload);
+        try writeAll(fd, payload);
     }
 }

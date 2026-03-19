@@ -198,6 +198,9 @@ fn collectWindowIds(con: *tree.Container, ids: *[256]u32, count: *usize) void {
         if (count.* < 256) {
             ids[count.*] = wd.id;
             count.* += 1;
+        } else {
+            std.log.warn("_NET_CLIENT_LIST: exceeded 256 window limit, some windows omitted", .{});
+            return;
         }
     }
     var cur = con.children.first;
@@ -352,7 +355,11 @@ fn readWmClass(allocator: std.mem.Allocator, conn: *xcb.Connection, window: xcb.
     const rest = data[null_pos + 1 ..];
     // Find second null (end of class) or use rest of data
     const class_end = std.mem.indexOfScalar(u8, rest, 0) orelse rest.len;
-    const class = allocator.dupe(u8, rest[0..class_end]) catch "";
+    const class = allocator.dupe(u8, rest[0..class_end]) catch {
+        // Free instance to avoid leak on class allocation failure
+        if (instance.len > 0) allocator.free(instance);
+        return .{ .instance = "", .class = "" };
+    };
     return .{ .instance = instance, .class = class };
 }
 
@@ -1248,8 +1255,14 @@ fn executeScratchpad(ctx: *EventContext, cmd: command_mod.Command) void {
 
 fn executeMode(ctx: *EventContext, cmd: command_mod.Command) void {
     const mode_name = cmd.args[0] orelse return;
-    ctx.current_mode = mode_name;
-    std.debug.print("ziawm: switched to mode \"{s}\"\n", .{mode_name});
+    // Dupe the mode string so it outlives the command's backing memory.
+    // Free the previous mode if it was allocator-owned (not the static "default").
+    const duped = ctx.allocator.dupe(u8, mode_name) catch return;
+    if (!std.mem.eql(u8, ctx.current_mode, "default")) {
+        ctx.allocator.free(ctx.current_mode);
+    }
+    ctx.current_mode = duped;
+    std.debug.print("ziawm: switched to mode \"{s}\"\n", .{duped});
 }
 
 // --- Key grabbing ---

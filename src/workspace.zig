@@ -36,9 +36,11 @@ pub fn findByNum(root: *tree.Container, num: i32) ?*tree.Container {
 /// The container is not attached to any parent; the caller is responsible for
 /// inserting it into the tree.
 pub fn create(allocator: Allocator, name: []const u8, num: i32) !*tree.Container {
+    const owned_name = try allocator.dupe(u8, name);
+    errdefer allocator.free(owned_name);
     const con = try tree.Container.create(allocator, .workspace);
     con.workspace = tree.WorkspaceData{
-        .name = name,
+        .name = owned_name,
         .num = num,
     };
     return con;

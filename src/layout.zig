@@ -1,3 +1,5 @@
+const std = @import("std");
+const log = std.log.scoped(.layout);
 const tree = @import("tree.zig");
 
 const TAB_BAR_HEIGHT: u32 = 16;
@@ -17,6 +19,9 @@ pub fn apply(con: *tree.Container, gap: u32, border: u32) void {
             if (count < MAX_TILING_CHILDREN) {
                 tiling[count] = child;
                 count += 1;
+            } else {
+                log.warn("MAX_TILING_CHILDREN ({d}) exceeded, additional children will not be tiled", .{MAX_TILING_CHILDREN});
+                break;
             }
         }
     }

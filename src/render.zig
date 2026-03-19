@@ -28,12 +28,14 @@ fn applyRecursive(
             const hide_unfocused = (con.layout == .tabbed or con.layout == .stacked) and
                 con.children.len() > 1;
 
+            // First pass: tiling children
             var cur = con.children.first;
             while (cur) |child| : (cur = child.next) {
                 if (child.is_floating) continue;
 
                 if (hide_unfocused) {
-                    if (child.is_focused) {
+                    const show = child.is_focused or (!anyTilingChildFocused(con) and isFirstTilingChild(con, child));
+                    if (show) {
                         mapSubtree(conn, child);
                         applyRecursive(conn, child, border_focus_color, border_unfocus_color);
                     } else {
@@ -42,6 +44,13 @@ fn applyRecursive(
                 } else {
                     applyRecursive(conn, child, border_focus_color, border_unfocus_color);
                 }
+            }
+
+            // Second pass: floating children (always rendered on top)
+            cur = con.children.first;
+            while (cur) |child| : (cur = child.next) {
+                if (!child.is_floating) continue;
+                applyRecursive(conn, child, border_focus_color, border_unfocus_color);
             }
         },
     }
@@ -88,6 +97,24 @@ fn mapSubtree(conn: *xcb.Connection, con: *tree.Container) void {
     while (cur) |child| : (cur = child.next) {
         mapSubtree(conn, child);
     }
+}
+
+/// Check if any tiling (non-floating) child has is_focused set.
+fn anyTilingChildFocused(con: *tree.Container) bool {
+    var cur = con.children.first;
+    while (cur) |child| : (cur = child.next) {
+        if (!child.is_floating and child.is_focused) return true;
+    }
+    return false;
+}
+
+/// Check if `child` is the first tiling (non-floating) child of `con`.
+fn isFirstTilingChild(con: *tree.Container, child: *tree.Container) bool {
+    var cur = con.children.first;
+    while (cur) |c| : (cur = c.next) {
+        if (!c.is_floating) return c == child;
+    }
+    return false;
 }
 
 /// Unmap all windows in a subtree.

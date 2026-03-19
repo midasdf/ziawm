@@ -180,6 +180,7 @@ pub fn parse(input: []const u8) ?Command {
     // "exec CMD"
     if (startsWith(u8, s, "exec ")) {
         const rest = trimLeft(s["exec ".len..]);
+        if (rest.len == 0) return null;
         return Command{ .type = .exec, .args = .{ rest, null, null, null }, .criteria = crit };
     }
 
