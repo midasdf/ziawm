@@ -487,9 +487,18 @@ pub fn main() !void {
 
     try output.detectOutputs(conn, tree_root, allocator);
 
+    // 7b. Subscribe to RandR screen change events
+    const randr_base_event = xcb.randrQueryExtension(conn);
+    if (randr_base_event > 0) {
+        _ = xcb.randrSelectInput(conn, root_window,
+            xcb.RANDR_NOTIFY_MASK_SCREEN_CHANGE |
+            xcb.RANDR_NOTIFY_MASK_OUTPUT_CHANGE |
+            xcb.RANDR_NOTIFY_MASK_CRTC_CHANGE);
+    }
+
     _ = xcb.flush(conn);
 
-    // 7a. Load config
+    // 7c. Load config
     var config = loadConfig(allocator);
     defer if (config) |*cfg| cfg.deinit();
 
@@ -625,6 +634,7 @@ pub fn main() !void {
         .key_symbols = key_symbols,
         .border_focus_color = border_focus_color,
         .border_unfocus_color = border_unfocus_color,
+        .randr_base_event = randr_base_event,
     };
 
     // 10. Grab keys from config

@@ -162,8 +162,16 @@ pub const GRAB_ANY: u8 = c.XCB_GRAB_ANY;
 pub const BUTTON_INDEX_ANY: u8 = c.XCB_BUTTON_INDEX_ANY;
 pub const BUTTON_INDEX_1: u8 = 1;
 
-// RandR connection
+// RandR connection status
 pub const RANDR_CONNECTION_CONNECTED: u32 = c.XCB_RANDR_CONNECTION_CONNECTED;
+
+// RandR notify masks (for xcb_randr_select_input)
+pub const RANDR_NOTIFY_MASK_SCREEN_CHANGE: u16 = c.XCB_RANDR_NOTIFY_MASK_SCREEN_CHANGE;
+pub const RANDR_NOTIFY_MASK_CRTC_CHANGE: u16 = c.XCB_RANDR_NOTIFY_MASK_CRTC_CHANGE;
+pub const RANDR_NOTIFY_MASK_OUTPUT_CHANGE: u16 = c.XCB_RANDR_NOTIFY_MASK_OUTPUT_CHANGE;
+
+// RandR event types
+pub const RandrScreenChangeNotifyEvent = c.xcb_randr_screen_change_notify_event_t;
 
 // --- Core functions ---
 pub fn connect(display: ?[*:0]const u8, screen: ?*c_int) ?*Connection {
@@ -374,6 +382,35 @@ pub fn randrGetCrtcInfo(conn: *Connection, crtc: RandrCrtc, config_timestamp: Ti
 
 pub fn randrGetCrtcInfoReply(conn: *Connection, cookie: RandrGetCrtcInfoCookie, err: ?*?*GenericError) ?*RandrGetCrtcInfoReply {
     return c.xcb_randr_get_crtc_info_reply(conn, cookie, err);
+}
+
+pub fn randrSelectInput(conn: *Connection, window: Window, enable: u16) VoidCookie {
+    return c.xcb_randr_select_input(conn, window, enable);
+}
+
+pub fn randrGetScreenResourcesCurrent(conn: *Connection, window: Window) c.xcb_randr_get_screen_resources_current_cookie_t {
+    return c.xcb_randr_get_screen_resources_current(conn, window);
+}
+
+pub fn randrGetScreenResourcesCurrentReply(conn: *Connection, cookie: c.xcb_randr_get_screen_resources_current_cookie_t, err: ?*?*GenericError) ?*c.xcb_randr_get_screen_resources_current_reply_t {
+    return c.xcb_randr_get_screen_resources_current_reply(conn, cookie, err);
+}
+
+pub fn randrGetOutputInfoName(reply: *RandrGetOutputInfoReply) []const u8 {
+    const ptr = c.xcb_randr_get_output_info_name(reply);
+    const len: usize = @intCast(c.xcb_randr_get_output_info_name_length(reply));
+    if (ptr == null or len == 0) return "";
+    const data: [*]const u8 = @ptrCast(ptr.?);
+    return data[0..len];
+}
+
+/// Query RandR extension base event number. Returns 0 on failure.
+pub fn randrQueryExtension(conn: *Connection) u8 {
+    const reply = c.xcb_get_extension_data(conn, &c.xcb_randr_id);
+    if (reply) |r| {
+        if (r.*.present != 0) return r.*.first_event;
+    }
+    return 0;
 }
 
 // --- Helpers ---

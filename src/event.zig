@@ -10,6 +10,7 @@ const scratchpad = @import("scratchpad.zig");
 const criteria = @import("criteria.zig");
 const layout = @import("layout.zig");
 const render = @import("render.zig");
+const output = @import("output.zig");
 
 pub const EventContext = struct {
     conn: *xcb.Connection,
@@ -24,6 +25,7 @@ pub const EventContext = struct {
     key_symbols: ?*xcb.KeySymbols,
     border_focus_color: u32,
     border_unfocus_color: u32,
+    randr_base_event: u8 = 0,
 };
 
 /// Dispatch an X11 event to the appropriate handler.
@@ -42,8 +44,23 @@ pub fn handleEvent(ctx: *EventContext, event: *xcb.GenericEvent) void {
         xcb.BUTTON_PRESS => handleButtonPress(ctx, @ptrCast(event)),
         xcb.FOCUS_IN => handleFocusIn(ctx, @ptrCast(event)),
         xcb.MAPPING_NOTIFY => handleMappingNotify(ctx, event),
-        else => {}, // Ignore unhandled events
+        else => {
+            // Check for RandR events (dynamic event type based on extension base)
+            if (ctx.randr_base_event > 0 and response_type == ctx.randr_base_event) {
+                handleRandrScreenChange(ctx);
+            }
+        },
     }
+}
+
+fn handleRandrScreenChange(ctx: *EventContext) void {
+    std.debug.print("zephwm: RandR screen change detected, updating outputs\n", .{});
+    output.updateOutputs(ctx.conn, ctx.tree_root, ctx.allocator) catch |err| {
+        std.debug.print("zephwm: failed to update outputs: {}\n", .{err});
+        return;
+    };
+    relayoutAndRender(ctx);
+    updateAllEwmh(ctx);
 }
 
 // --- Tree helpers ---
@@ -942,7 +959,7 @@ pub fn executeCommand(ctx: *EventContext, cmd: command_mod.Command) void {
             ctx.running.* = false;
         },
         .resize => {}, // TODO
-        .focus_output => {}, // TODO
+        .focus_output => executeFocusOutput(ctx, cmd),
         .nop => {},
     }
 }
@@ -1392,6 +1409,51 @@ fn executeScratchpad(ctx: *EventContext, cmd: command_mod.Command) void {
         child.is_floating = true; // scratchpad windows are floating when shown
         current_ws.appendChild(child);
         setFocus(ctx, child);
+        relayoutAndRender(ctx);
+    }
+}
+
+fn executeFocusOutput(ctx: *EventContext, cmd: command_mod.Command) void {
+    const arg = cmd.args[0] orelse return;
+
+    // Find current output
+    const focused_ws = getFocusedWorkspace(ctx.tree_root) orelse return;
+    const current_output = focused_ws.parent orelse return;
+    if (current_output.type != .output) return;
+
+    // Directional or named output
+    const target = if (std.mem.eql(u8, arg, "left"))
+        output.findAdjacent(ctx.tree_root, current_output, .left)
+    else if (std.mem.eql(u8, arg, "right"))
+        output.findAdjacent(ctx.tree_root, current_output, .right)
+    else if (std.mem.eql(u8, arg, "up"))
+        output.findAdjacent(ctx.tree_root, current_output, .up)
+    else if (std.mem.eql(u8, arg, "down"))
+        output.findAdjacent(ctx.tree_root, current_output, .down)
+    else
+        output.findByName(ctx.tree_root, arg);
+
+    const target_output = target orelse return;
+
+    // Focus the first (or focused) workspace on the target output
+    var ws_cur = target_output.children.first;
+    var target_ws: ?*tree.Container = null;
+    while (ws_cur) |ws| : (ws_cur = ws.next) {
+        if (ws.type == .workspace) {
+            if (target_ws == null) target_ws = ws;
+            if (ws.is_focused) {
+                target_ws = ws;
+                break;
+            }
+        }
+    }
+
+    if (target_ws) |ws| {
+        setFocus(ctx, ws);
+        // Try to focus a window in this workspace
+        if (findFocusedLeaf(ws)) |leaf| {
+            if (leaf != ws) setFocus(ctx, leaf);
+        }
         relayoutAndRender(ctx);
     }
 }
