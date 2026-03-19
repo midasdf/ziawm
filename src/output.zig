@@ -87,9 +87,65 @@ pub fn detectOutputs(
     }
 }
 
-/// Query RandR for connected outputs with active CRTCs.
-/// Returns the number of active outputs found (up to MAX_OUTPUTS).
+/// Query RandR 1.5 monitors first (supports virtual monitors from xrandr --setmonitor).
+/// Falls back to RandR outputs+CRTCs if no monitors found.
 fn queryRandrOutputs(conn: *xcb.Connection, root: xcb.Window, out: *[MAX_OUTPUTS]OutputInfo) usize {
+    // Try RandR 1.5 Monitors API first (handles virtual monitors + real monitors)
+    const count = queryRandrMonitors(conn, root, out);
+    if (count > 0) return count;
+
+    // Fallback: RandR outputs + CRTCs (pre-1.5)
+    return queryRandrCrtcs(conn, root, out);
+}
+
+/// Query RandR 1.5 monitors (includes virtual monitors from xrandr --setmonitor).
+fn queryRandrMonitors(conn: *xcb.Connection, root: xcb.Window, out: *[MAX_OUTPUTS]OutputInfo) usize {
+    const cookie = xcb.randrGetMonitors(conn, root, 1); // get_active=1
+    const reply = xcb.randrGetMonitorsReply(conn, cookie, null) orelse return 0;
+    defer std.c.free(reply);
+
+    var iter = xcb.randrGetMonitorsMonitorsIterator(reply);
+    var count: usize = 0;
+
+    while (iter.rem > 0) : (xcb.randrMonitorInfoNext(&iter)) {
+        if (count >= MAX_OUTPUTS) break;
+        const mon = iter.data.*;
+
+        // Skip monitors with zero dimensions
+        if (mon.width == 0 or mon.height == 0) continue;
+
+        var info = &out[count];
+        info.x = mon.x;
+        info.y = mon.y;
+        info.w = mon.width;
+        info.h = mon.height;
+
+        // Get monitor name from atom
+        const name = resolveAtomName(conn, mon.name);
+        info.name_len = @intCast(@min(name.len, 64));
+        @memcpy(info.name[0..info.name_len], name[0..info.name_len]);
+
+        count += 1;
+    }
+
+    return count;
+}
+
+/// Resolve an X atom to its string name. Returns "?" on failure.
+fn resolveAtomName(conn: *xcb.Connection, atom: xcb.Atom) []const u8 {
+    if (atom == 0) return "?";
+    const cookie = xcb.c.xcb_get_atom_name(conn, atom);
+    const reply = xcb.c.xcb_get_atom_name_reply(conn, cookie, null) orelse return "?";
+    defer std.c.free(reply);
+    const ptr = xcb.c.xcb_get_atom_name_name(reply);
+    const len: usize = @intCast(xcb.c.xcb_get_atom_name_name_length(reply));
+    if (ptr == null or len == 0) return "?";
+    const data: [*]const u8 = @ptrCast(ptr.?);
+    return data[0..len];
+}
+
+/// Fallback: query RandR outputs + CRTCs (pre-1.5 method).
+fn queryRandrCrtcs(conn: *xcb.Connection, root: xcb.Window, out: *[MAX_OUTPUTS]OutputInfo) usize {
     const res_cookie = xcb.randrGetScreenResources(conn, root);
     const res_reply = xcb.randrGetScreenResourcesReply(conn, res_cookie, null) orelse return 0;
     defer std.c.free(res_reply);
@@ -106,23 +162,16 @@ fn queryRandrOutputs(conn: *xcb.Connection, root: xcb.Window, out: *[MAX_OUTPUTS
         const oi_reply = xcb.randrGetOutputInfoReply(conn, oi_cookie, null) orelse continue;
         defer std.c.free(oi_reply);
 
-        // Skip disconnected outputs
         if (oi_reply.connection != xcb.RANDR_CONNECTION_CONNECTED) continue;
-
-        // Skip outputs without an active CRTC
         if (oi_reply.crtc == 0) continue;
 
-        // Get CRTC geometry
         const crtc_cookie = xcb.randrGetCrtcInfo(conn, oi_reply.crtc, timestamp);
         const crtc_reply = xcb.randrGetCrtcInfoReply(conn, crtc_cookie, null) orelse continue;
         defer std.c.free(crtc_reply);
 
-        // Skip CRTCs with zero dimensions (disabled)
         if (crtc_reply.width == 0 or crtc_reply.height == 0) continue;
 
-        // Get output name
         const name = xcb.randrGetOutputInfoName(oi_reply);
-
         var info = &out[count];
         info.x = crtc_reply.x;
         info.y = crtc_reply.y;

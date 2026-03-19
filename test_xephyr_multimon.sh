@@ -113,7 +113,8 @@ echo "=== Setup A: Dual Monitor (1920x1080 + 1366x768) ==="
 # ============================================================
 # Xephyr with 2 screens creates a Xinerama setup
 rm -f /tmp/.X98-lock /tmp/.X11-unix/X98 2>/dev/null
-Xephyr $DISPLAY_NUM -screen 1920x1080 -screen 1366x768 -ac -br -noreset 2>/dev/null &
+# Single large screen, split into virtual monitors with xrandr --setmonitor
+Xephyr $DISPLAY_NUM -screen 3286x1080 -ac -br -noreset 2>/dev/null &
 XEPHYR_PID=$!
 sleep 1
 
@@ -121,6 +122,11 @@ if ! kill -0 "$XEPHYR_PID" 2>/dev/null; then
     echo -e "${RED}FATAL: Xephyr failed to start${NC}"
     exit 1
 fi
+
+# Create virtual monitors: LEFT 1920x1080 + RIGHT 1366x1080
+DISPLAY=$DISPLAY_NUM xrandr --setmonitor LEFT 1920/507x1080/285+0+0 default 2>/dev/null
+DISPLAY=$DISPLAY_NUM xrandr --setmonitor RIGHT 1366/361x1080/285+1920+0 none 2>/dev/null
+sleep 0.5
 
 DISPLAY=$DISPLAY_NUM "$ZEPHWM" 2>/tmp/zephwm-mm.log &
 WM_PID=$!
@@ -138,13 +144,14 @@ echo "--- Test 1: Output Detection ---"
 OUTPUTS=$(run_msg_type get_outputs)
 echo "  Outputs: $OUTPUTS"
 
-# Should have at least 1 output (Xephyr might report as single Xinerama screen)
+# Should have 2 outputs (LEFT + RIGHT virtual monitors)
 OUTPUT_COUNT=$(echo "$OUTPUTS" | grep -o '"name":' | wc -l)
-assert_numeric_ge "at least 1 output detected" "$OUTPUT_COUNT" 1
+assert_numeric_eq "2 outputs detected" "$OUTPUT_COUNT" 2
 
-# Output should have correct dimensions
-assert_contains "output has width" "$OUTPUTS" '"width":'
-assert_contains "output is active" "$OUTPUTS" '"active":true'
+assert_contains "LEFT output" "$OUTPUTS" '"name":"LEFT"'
+assert_contains "RIGHT output" "$OUTPUTS" '"name":"RIGHT"'
+assert_contains "LEFT width 1920" "$OUTPUTS" '"width":1920'
+assert_contains "RIGHT at x=1920" "$OUTPUTS" '"x":1920'
 
 echo ""
 echo "--- Test 2: Workspaces on Outputs ---"
@@ -173,20 +180,38 @@ assert_numeric_eq "3 total windows" "$WIN_COUNT" 3
 echo ""
 echo "--- Test 4: focus output Command ---"
 
-# focus output right should try to move focus
+# Start on ws1 (LEFT output)
+run_msg "workspace 1" >/dev/null 2>&1
+
+# focus output right → should move to RIGHT output (ws2)
 result=$(run_msg "focus output right")
 assert_success "focus output right" "$result"
 
+WS=$(run_msg_type get_workspaces)
+# After focusing right output, ws2 should be focused
+assert_contains "focused RIGHT output ws" "$WS" '"name":"2","visible":true,"focused":true'
+
+# focus output left → back to LEFT output (ws1)
 result=$(run_msg "focus output left")
 assert_success "focus output left" "$result"
 
+WS=$(run_msg_type get_workspaces)
+assert_contains "focused LEFT output ws" "$WS" '"name":"1","visible":true,"focused":true'
+
+# focus output by name
+result=$(run_msg "focus output RIGHT")
+assert_success "focus output RIGHT (name)" "$result"
+
+result=$(run_msg "focus output LEFT")
+assert_success "focus output LEFT (name)" "$result"
+
+# up/down should be no-op (monitors are side-by-side) but shouldn't crash
 result=$(run_msg "focus output up")
-assert_success "focus output up" "$result"
+assert_success "focus output up (no-op)" "$result"
 
 result=$(run_msg "focus output down")
-assert_success "focus output down" "$result"
+assert_success "focus output down (no-op)" "$result"
 
-# WM should survive all focus output commands
 if kill -0 "$WM_PID" 2>/dev/null; then
     echo -e "  ${GREEN}PASS${NC}: survived focus output cycling"
     PASS=$((PASS + 1))
@@ -234,9 +259,11 @@ echo ""
 echo "--- Test 7: get_tree Shows Multiple Outputs ---"
 
 TREE=$(run_msg_type get_tree)
-# Tree should have output type containers
+# Tree should have 2 output containers
 OUTPUT_COUNT_TREE=$(echo "$TREE" | grep -o '"type":"output"' | wc -l)
-assert_numeric_ge "tree has output containers" "$OUTPUT_COUNT_TREE" 1
+assert_numeric_eq "tree has 2 output containers" "$OUTPUT_COUNT_TREE" 2
+assert_contains "tree has LEFT output" "$TREE" '"name":"LEFT"'
+assert_contains "tree has RIGHT output" "$TREE" '"name":"RIGHT"'
 
 echo ""
 echo "--- Test 8: Fullscreen on Specific Output ---"

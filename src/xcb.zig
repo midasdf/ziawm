@@ -396,6 +396,28 @@ pub fn randrGetScreenResourcesCurrentReply(conn: *Connection, cookie: c.xcb_rand
     return c.xcb_randr_get_screen_resources_current_reply(conn, cookie, err);
 }
 
+// RandR 1.5 Monitor types
+pub const RandrMonitorInfo = c.xcb_randr_monitor_info_t;
+pub const RandrMonitorInfoIterator = c.xcb_randr_monitor_info_iterator_t;
+pub const RandrGetMonitorsCookie = c.xcb_randr_get_monitors_cookie_t;
+pub const RandrGetMonitorsReply = c.xcb_randr_get_monitors_reply_t;
+
+pub fn randrGetMonitors(conn: *Connection, window: Window, get_active: u8) RandrGetMonitorsCookie {
+    return c.xcb_randr_get_monitors(conn, window, get_active);
+}
+
+pub fn randrGetMonitorsReply(conn: *Connection, cookie: RandrGetMonitorsCookie, err: ?*?*GenericError) ?*RandrGetMonitorsReply {
+    return c.xcb_randr_get_monitors_reply(conn, cookie, err);
+}
+
+pub fn randrGetMonitorsMonitorsIterator(reply: *RandrGetMonitorsReply) RandrMonitorInfoIterator {
+    return c.xcb_randr_get_monitors_monitors_iterator(reply);
+}
+
+pub fn randrMonitorInfoNext(iter: *RandrMonitorInfoIterator) void {
+    c.xcb_randr_monitor_info_next(iter);
+}
+
 pub fn randrGetOutputInfoName(reply: *RandrGetOutputInfoReply) []const u8 {
     const ptr = c.xcb_randr_get_output_info_name(reply);
     const len: usize = @intCast(c.xcb_randr_get_output_info_name_length(reply));
