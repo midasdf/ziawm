@@ -2,7 +2,7 @@
 
 **Zig Extreme Performance Hyper Window Manager** — an i3-compatible tiling window manager written in Zig.
 
-zephwm aims to be a lightweight, fast alternative to i3 for X11 Linux systems. It speaks the i3 IPC protocol, reads i3-style config files, and supports the core i3 workflow: tree-based container management with horizontal/vertical splits, tabbed and stacked layouts, workspaces, and keybind-driven operation.
+Born out of frustration with running i3 on a HackberryPi Zero (RPi Zero 2W, 512MB RAM) where everything felt sluggish — i3 plus its dependencies consumed precious memory and every operation had noticeable latency. zephwm strips away GLib, pango, cairo, and other heavy dependencies, using xcb directly and keeping the entire WM under 200KB. It speaks the i3 IPC protocol, reads i3-style config files, and supports the core i3 workflow: tree-based container management with horizontal/vertical splits, tabbed and stacked layouts, workspaces, and keybind-driven operation.
 
 ## Status
 
