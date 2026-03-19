@@ -1156,7 +1156,8 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
 fn executeMoveWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
     const name = cmd.args[0] orelse return;
     const focused = getFocusedContainer(ctx.tree_root) orelse return;
-    if (focused.type != .window) return;
+    // Allow moving windows and split containers (not workspaces/outputs/root)
+    if (focused.type != .window and focused.type != .split_con) return;
 
     // Find or create target workspace
     // Try by name first, then by number (for "workspace number N" commands)
