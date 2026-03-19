@@ -182,6 +182,7 @@ fn relayoutAndRender(ctx: *EventContext) void {
     // Apply layout to all workspaces
     const cfg = ctx.config;
     const gap: u32 = if (cfg) |c| c.gap_inner else 0;
+    const gap_outer: u32 = if (cfg) |c| c.gap_outer else 0;
     const border: u32 = if (cfg) |c| c.border_px else 1;
 
     var cur = ctx.tree_root.children.first;
@@ -190,6 +191,19 @@ fn relayoutAndRender(ctx: *EventContext) void {
         var ws_cur = output_con.children.first;
         while (ws_cur) |ws| : (ws_cur = ws.next) {
             if (ws.type == .workspace) {
+                // Apply outer gaps by shrinking the workspace rect
+                if (gap_outer > 0) {
+                    const og: i32 = @intCast(gap_outer);
+                    const og2: u32 = gap_outer * 2;
+                    ws.rect = .{
+                        .x = output_con.rect.x + og,
+                        .y = output_con.rect.y + og,
+                        .w = if (output_con.rect.w > og2) output_con.rect.w - og2 else 0,
+                        .h = if (output_con.rect.h > og2) output_con.rect.h - og2 else 0,
+                    };
+                } else {
+                    ws.rect = output_con.rect;
+                }
                 layout.apply(ws, gap, border);
             }
         }
