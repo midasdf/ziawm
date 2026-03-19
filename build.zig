@@ -63,11 +63,29 @@ pub fn build(b: *std.Build) void {
     bar_exe.linkLibC();
     b.installArtifact(bar_exe);
 
+    // Shared tree module (pure Zig, no xcb dependency)
+    const tree_mod = b.createModule(.{
+        .root_source_file = b.path("src/tree.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // --- Test step ---
-    // Test entries will be added here as modules are created.
-    // For now, just set up the infrastructure.
     const test_step = b.step("test", "Run tests");
-    _ = test_step;
+
+    // tree tests
+    const tree_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_tree.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "tree", .module = tree_mod },
+            },
+        }),
+    });
+    const run_tree_tests = b.addRunArtifact(tree_tests);
+    test_step.dependOn(&run_tree_tests.step);
 
     // Run steps
     const run_ziawm = b.addRunArtifact(ziawm_exe);
