@@ -1,4 +1,4 @@
-// ziawm — i3-compatible tiling window manager
+// zephwm — i3-compatible tiling window manager
 const std = @import("std");
 const xcb = @import("xcb.zig");
 const atoms_mod = @import("atoms.zig");
@@ -30,7 +30,7 @@ fn handleIpcMessage(ctx: *event.EventContext, client_fd: std.posix.fd_t, msg_typ
 
     const response: []const u8 = switch (msg_type) {
         @intFromEnum(ipc.MessageType.get_version) =>
-            "{\"human_readable\":\"ziawm " ++ VERSION ++ "\",\"loaded_config_file_name\":\"\",\"minor\":1,\"major\":0,\"patch\":0}",
+            "{\"human_readable\":\"zephwm " ++ VERSION ++ "\",\"loaded_config_file_name\":\"\",\"minor\":1,\"major\":0,\"patch\":0}",
         @intFromEnum(ipc.MessageType.run_command) => blk: {
             // Execute the command
             if (payload.len > 0) {
@@ -332,32 +332,32 @@ fn loadConfig(allocator: std.mem.Allocator) ?config_mod.Config {
 
     var path_buf: [512]u8 = undefined;
 
-    // 1. XDG_CONFIG_HOME/ziawm/config
+    // 1. XDG_CONFIG_HOME/zephwm/config
     if (xdg_config) |xdg| {
-        const len = (std.fmt.bufPrint(&path_buf, "{s}/ziawm/config", .{xdg}) catch "").len;
+        const len = (std.fmt.bufPrint(&path_buf, "{s}/zephwm/config", .{xdg}) catch "").len;
         if (len > 0) {
             if (readConfigFile(allocator, path_buf[0..len])) |cfg| return cfg;
         }
     }
 
-    // 2. ~/.config/ziawm/config
+    // 2. ~/.config/zephwm/config
     {
-        const len = (std.fmt.bufPrint(&path_buf, "{s}/.config/ziawm/config", .{home}) catch "").len;
+        const len = (std.fmt.bufPrint(&path_buf, "{s}/.config/zephwm/config", .{home}) catch "").len;
         if (len > 0) {
             if (readConfigFile(allocator, path_buf[0..len])) |cfg| return cfg;
         }
     }
 
-    // 3. ~/.ziawm/config
+    // 3. ~/.zephwm/config
     {
-        const len = (std.fmt.bufPrint(&path_buf, "{s}/.ziawm/config", .{home}) catch "").len;
+        const len = (std.fmt.bufPrint(&path_buf, "{s}/.zephwm/config", .{home}) catch "").len;
         if (len > 0) {
             if (readConfigFile(allocator, path_buf[0..len])) |cfg| return cfg;
         }
     }
 
-    // 4. /etc/ziawm/config
-    if (readConfigFile(allocator, "/etc/ziawm/config")) |cfg| return cfg;
+    // 4. /etc/zephwm/config
+    if (readConfigFile(allocator, "/etc/zephwm/config")) |cfg| return cfg;
 
     return null;
 }
@@ -387,11 +387,11 @@ pub fn main() !void {
     _ = args.next(); // skip argv[0]
     if (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
-            std.debug.print("ziawm v{s}\n", .{VERSION});
+            std.debug.print("zephwm v{s}\n", .{VERSION});
             return;
         }
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            std.debug.print("Usage: ziawm [--version] [--help]\n", .{});
+            std.debug.print("Usage: zephwm [--version] [--help]\n", .{});
             return;
         }
     }
@@ -478,7 +478,7 @@ pub fn main() !void {
         const check_val = [_]u32{wm_check_window};
         _ = xcb.changeProperty(conn, xcb.PROP_MODE_REPLACE, root_window, atoms.net_supporting_wm_check, xcb.ATOM_WINDOW, 32, 1, @ptrCast(&check_val));
         _ = xcb.changeProperty(conn, xcb.PROP_MODE_REPLACE, wm_check_window, atoms.net_supporting_wm_check, xcb.ATOM_WINDOW, 32, 1, @ptrCast(&check_val));
-        _ = xcb.changeProperty(conn, xcb.PROP_MODE_REPLACE, wm_check_window, atoms.net_wm_name, atoms.utf8_string, 8, 5, "ziawm");
+        _ = xcb.changeProperty(conn, xcb.PROP_MODE_REPLACE, wm_check_window, atoms.net_wm_name, atoms.utf8_string, 8, 6, "zephwm");
     }
 
     // 7. Create tree root and detect outputs
@@ -540,7 +540,7 @@ pub fn main() !void {
     // IPC client fd tracking
     var ipc_client_fds: [MAX_IPC_CLIENTS]std.posix.fd_t = .{-1} ** MAX_IPC_CLIENTS;
 
-    std.debug.print("ziawm v{s} started (screen {}x{}, ipc: {s})\n", .{
+    std.debug.print("zephwm v{s} started (screen {}x{}, ipc: {s})\n", .{
         VERSION,
         screen.width_in_pixels,
         screen.height_in_pixels,
@@ -752,7 +752,7 @@ pub fn main() !void {
                         },
                         linux.SIG.USR1 => {
                             // Reload config
-                            std.debug.print("ziawm: SIGUSR1 received, reloading config\n", .{});
+                            std.debug.print("zephwm: SIGUSR1 received, reloading config\n", .{});
                             if (config) |*cfg| cfg.deinit();
                             config = loadConfig(allocator);
                             if (config) |*cfg| {
@@ -788,5 +788,5 @@ pub fn main() !void {
     // Free static buffers
     tree_json_buf.deinit(allocator);
 
-    std.debug.print("ziawm shutting down\n", .{});
+    std.debug.print("zephwm shutting down\n", .{});
 }

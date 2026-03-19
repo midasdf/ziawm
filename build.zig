@@ -11,29 +11,29 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // --- ziawm (main WM) ---
-    const ziawm_exe = b.addExecutable(.{
-        .name = "ziawm",
+    // --- zephwm (main WM) ---
+    const zephwm_exe = b.addExecutable(.{
+        .name = "zephwm",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
-    ziawm_exe.linkSystemLibrary("xcb");
-    ziawm_exe.linkSystemLibrary("xcb-keysyms");
-    ziawm_exe.linkSystemLibrary("xcb-randr");
-    ziawm_exe.linkSystemLibrary("xcb-xkb");
-    ziawm_exe.linkSystemLibrary("xkbcommon");
-    ziawm_exe.linkSystemLibrary("xkbcommon-x11");
-    ziawm_exe.linkLibC();
-    b.installArtifact(ziawm_exe);
+    zephwm_exe.linkSystemLibrary("xcb");
+    zephwm_exe.linkSystemLibrary("xcb-keysyms");
+    zephwm_exe.linkSystemLibrary("xcb-randr");
+    zephwm_exe.linkSystemLibrary("xcb-xkb");
+    zephwm_exe.linkSystemLibrary("xkbcommon");
+    zephwm_exe.linkSystemLibrary("xkbcommon-x11");
+    zephwm_exe.linkLibC();
+    b.installArtifact(zephwm_exe);
 
-    // --- ziawm-msg ---
+    // --- zephwm-msg ---
     const msg_exe = b.addExecutable(.{
-        .name = "ziawm-msg",
+        .name = "zephwm-msg",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("ziawm-msg/main.zig"),
+            .root_source_file = b.path("zephwm-msg/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -45,11 +45,11 @@ pub fn build(b: *std.Build) void {
     msg_exe.linkLibC();
     b.installArtifact(msg_exe);
 
-    // --- ziawm-bar ---
+    // --- zephwm-bar ---
     const bar_exe = b.addExecutable(.{
-        .name = "ziawm-bar",
+        .name = "zephwm-bar",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("ziawm-bar/main.zig"),
+            .root_source_file = b.path("zephwm-bar/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -203,8 +203,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_ipc_tests.step);
 
     // Run steps
-    const run_ziawm = b.addRunArtifact(ziawm_exe);
-    run_ziawm.step.dependOn(b.getInstallStep());
-    const run_step = b.step("run", "Run ziawm");
-    run_step.dependOn(&run_ziawm.step);
+    const run_zephwm = b.addRunArtifact(zephwm_exe);
+    run_zephwm.step.dependOn(b.getInstallStep());
+    const run_step = b.step("run", "Run zephwm");
+    run_step.dependOn(&run_zephwm.step);
 }

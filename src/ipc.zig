@@ -1,4 +1,4 @@
-// IPC module — shared between ziawm, ziawm-msg, and ziawm-bar
+// IPC module — shared between zephwm, zephwm-msg, and zephwm-bar
 // i3-compatible binary IPC protocol
 const std = @import("std");
 
@@ -82,10 +82,10 @@ pub fn isEvent(msg_type: u32) bool {
 
 // --- Server-side IPC ---
 
-/// Get default socket path: /run/user/{uid}/ziawm/ipc.sock
+/// Get default socket path: /run/user/{uid}/zephwm/ipc.sock
 pub fn getDefaultSocketPath(buf: []u8) []const u8 {
     const uid = std.os.linux.getuid();
-    const len = (std.fmt.bufPrint(buf, "/run/user/{d}/ziawm/ipc.sock", .{uid}) catch return buf[0..0]).len;
+    const len = (std.fmt.bufPrint(buf, "/run/user/{d}/zephwm/ipc.sock", .{uid}) catch return buf[0..0]).len;
     return buf[0..len];
 }
 

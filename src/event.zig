@@ -904,7 +904,7 @@ pub fn executeCommand(ctx: *EventContext, cmd: command_mod.Command) void {
         .mode => executeMode(ctx, cmd),
         .reload => executeReload(ctx),
         .restart => {
-            std.debug.print("ziawm: restart not yet implemented\n", .{});
+            std.debug.print("zephwm: restart not yet implemented\n", .{});
         },
         .exit => {
             ctx.running.* = false;
@@ -1381,7 +1381,7 @@ fn executeMode(ctx: *EventContext, cmd: command_mod.Command) void {
         ctx.allocator.free(ctx.current_mode);
     }
     ctx.current_mode = duped;
-    std.debug.print("ziawm: switched to mode \"{s}\"\n", .{duped});
+    std.debug.print("zephwm: switched to mode \"{s}\"\n", .{duped});
 }
 
 // --- Key grabbing ---

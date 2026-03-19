@@ -1,5 +1,5 @@
-# ziawm default config — i3-compatible
-# Copy to ~/.config/ziawm/config and customize
+# zephwm default config — i3-compatible
+# Copy to ~/.config/zephwm/config and customize
 
 # Mod key: Mod4 = Super/Win, Mod1 = Alt
 set $mod Mod4
