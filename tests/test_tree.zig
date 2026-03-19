@@ -213,17 +213,17 @@ test "marks capacity limit" {
     const c = try Container.create(alloc, .window);
     defer c.destroy(alloc);
 
-    // Fill to max capacity (8)
-    const mark_names = [_][]const u8{ "m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8" };
+    // Fill to max capacity (4)
+    const mark_names = [_][]const u8{ "m1", "m2", "m3", "m4" };
     for (mark_names) |name| {
         const owned = try alloc.dupe(u8, name);
         try c.addMark(owned);
     }
-    try std.testing.expectEqual(@as(u8, 8), c.mark_count);
+    try std.testing.expectEqual(@as(u8, 4), c.mark_count);
 
     // Adding one more should return error
     {
-        const overflow = try alloc.dupe(u8, "m9");
+        const overflow = try alloc.dupe(u8, "m5");
         try std.testing.expectError(error.MarksCapacityExceeded, c.addMark(overflow));
         alloc.free(overflow); // caller frees on error
     }

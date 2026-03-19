@@ -16,6 +16,19 @@ extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int
 
 const VERSION = "0.1.0";
 
+/// Write a JSON-escaped string to writer.
+fn jsonEscapeWrite(w: anytype, s: []const u8) !void {
+    for (s) |ch| {
+        switch (ch) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            else => {
+                if (ch >= 0x20) try w.writeByte(ch);
+            },
+        }
+    }
+}
+
 // Default border colors (can be overridden by config)
 const DEFAULT_BORDER_FOCUS_COLOR: u32 = 0x4c7899;
 const DEFAULT_BORDER_UNFOCUS_COLOR: u32 = 0x333333;
@@ -105,18 +118,7 @@ fn buildWorkspacesJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
             }
 
             std.fmt.format(w, "{{\"num\":{d},\"name\":\"", .{num}) catch return "[]";
-            // JSON-escape the workspace name
-            for (name) |ch| {
-                switch (ch) {
-                    '"' => w.writeAll("\\\"") catch return "[]",
-                    '\\' => w.writeAll("\\\\") catch return "[]",
-                    else => {
-                        if (ch >= 0x20) {
-                            w.writeByte(ch) catch return "[]";
-                        }
-                    },
-                }
-            }
+            jsonEscapeWrite(w, name) catch return "[]";
             std.fmt.format(w, "\",\"visible\":{},\"focused\":{},\"output\":\"default\",\"urgent\":{},\"rect\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}}}}", .{
                 visible,
                 focused,
@@ -180,16 +182,7 @@ fn buildOutputsJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
                 out_con.rect.h,
             },
         ) catch return "[]";
-        // JSON-escape workspace name
-        for (ws_name) |ch| {
-            switch (ch) {
-                '"' => w.writeAll("\\\"") catch return "[]",
-                '\\' => w.writeAll("\\\\") catch return "[]",
-                else => {
-                    if (ch >= 0x20) w.writeByte(ch) catch return "[]";
-                },
-            }
-        }
+        jsonEscapeWrite(w, ws_name) catch return "[]";
         w.writeAll("\"}}") catch return "[]";
         is_primary = false;
     }
@@ -224,15 +217,7 @@ fn collectMarksRecursive(con: *tree.Container, w: anytype, first: *bool) !void {
             if (!first.*) try w.writeByte(',');
             first.* = false;
             try w.writeByte('"');
-            for (mark) |ch| {
-                switch (ch) {
-                    '"' => try w.writeAll("\\\""),
-                    '\\' => try w.writeAll("\\\\"),
-                    else => {
-                        if (ch >= 0x20) try w.writeByte(ch);
-                    },
-                }
-            }
+            try jsonEscapeWrite(w, mark);
             try w.writeByte('"');
         }
     }
@@ -278,17 +263,8 @@ fn writeContainerJson(w: anytype, con: *tree.Container) !void {
     if (con.workspace) |wsd| {
         try std.fmt.format(w, ",\"name\":\"{s}\"", .{wsd.name});
     } else if (con.window) |wd| {
-        // Escape window title for JSON (simple: just skip control chars)
         try w.writeAll(",\"name\":\"");
-        for (wd.title) |ch| {
-            if (ch == '"') {
-                try w.writeAll("\\\"");
-            } else if (ch == '\\') {
-                try w.writeAll("\\\\");
-            } else if (ch >= 0x20) {
-                try w.writeByte(ch);
-            }
-        }
+        try jsonEscapeWrite(w, wd.title);
         try w.writeAll("\"");
     }
 
@@ -704,6 +680,8 @@ pub fn main() !void {
                     event.handleEvent(&ctx, xevent);
                     std.c.free(xevent);
                 }
+                // Batch flush after processing all X events
+                _ = xcb.flush(conn);
 
                 // Check for connection errors
                 if (xcb.connectionHasError(conn) != 0) {
@@ -757,6 +735,8 @@ pub fn main() !void {
                                 break;
                             }
                         }
+                        // Flush after IPC commands (may have issued X11 requests)
+                        _ = xcb.flush(conn);
                         break :blk;
                     }
                 }

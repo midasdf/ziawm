@@ -243,9 +243,22 @@ fn relayoutAndRender(ctx: *EventContext) void {
     var cur = ctx.tree_root.children.first;
     while (cur) |output_con| : (cur = output_con.next) {
         if (output_con.type != .output) continue;
-        var ws_cur = output_con.children.first;
-        while (ws_cur) |ws| : (ws_cur = ws.next) {
-            if (ws.type == .workspace) {
+
+        // Find the visible (focused) workspace for this output
+        var visible_ws: ?*tree.Container = null;
+        var first_ws_on_out: ?*tree.Container = null;
+        {
+            var scan = output_con.children.first;
+            while (scan) |s| : (scan = s.next) {
+                if (s.type != .workspace) continue;
+                if (first_ws_on_out == null) first_ws_on_out = s;
+                if (s.is_focused) { visible_ws = s; break; }
+            }
+        }
+        const ws_to_layout = visible_ws orelse first_ws_on_out;
+
+        // Only compute layout for the visible workspace (hidden ones don't need geometry)
+        if (ws_to_layout) |ws| {
                 // Start from output rect, apply bar reservation + outer gaps
                 var r = output_con.rect;
 
@@ -272,7 +285,6 @@ fn relayoutAndRender(ctx: *EventContext) void {
                 ws.rect = r;
                 layout.apply(ws, gap, border);
             }
-        }
     }
 
     render.applyTree(ctx.conn, ctx.tree_root, ctx.border_focus_color, ctx.border_unfocus_color);
@@ -807,7 +819,7 @@ fn handleEnterNotify(ctx: *EventContext, ev: *xcb.EnterNotifyEvent) void {
 
     const con = findContainerByWindow(ctx,ev.event) orelse return;
     setFocus(ctx, con);
-    _ = xcb.flush(ctx.conn);
+
 }
 
 fn handleButtonPress(ctx: *EventContext, ev: *xcb.ButtonPressEvent) void {
@@ -816,7 +828,7 @@ fn handleButtonPress(ctx: *EventContext, ev: *xcb.ButtonPressEvent) void {
 
     // Allow the click to pass through to the application
     _ = xcb.c.xcb_allow_events(ctx.conn, xcb.c.XCB_ALLOW_REPLAY_POINTER, xcb.CURRENT_TIME);
-    _ = xcb.flush(ctx.conn);
+
 }
 
 fn handleConfigureRequest(ctx: *EventContext, ev: *xcb.ConfigureRequestEvent) void {
@@ -875,7 +887,7 @@ fn handleConfigureRequest(ctx: *EventContext, ev: *xcb.ConfigureRequestEvent) vo
             _ = xcb.configureWindow(ctx.conn, ev.window, mask, &values);
         }
     }
-    _ = xcb.flush(ctx.conn);
+
 }
 
 /// Send a synthetic ConfigureNotify to tell a tiled window its current geometry.
@@ -1098,7 +1110,7 @@ fn executeFocus(ctx: *EventContext, cmd: command_mod.Command) void {
     } else if (std.mem.eql(u8, arg, "down")) {
         focusInDirection(ctx, focused, .vsplit, .next);
     }
-    _ = xcb.flush(ctx.conn);
+
 }
 
 fn getDeepestChild(con: *tree.Container) *tree.Container {
@@ -1367,7 +1379,7 @@ fn killWindow(ctx: *EventContext, con: *tree.Container, force: bool) void {
 
     // Force kill
     _ = xcb.killClient(ctx.conn, wd.id);
-    _ = xcb.flush(ctx.conn);
+
 }
 
 /// Send WM_DELETE_WINDOW client message. Returns true if the protocol is supported.
@@ -1403,7 +1415,7 @@ fn sendDeleteWindow(ctx: *EventContext, window: xcb.Window) bool {
     event_data.data.data32[1] = xcb.CURRENT_TIME;
 
     _ = xcb.sendEvent(ctx.conn, 0, window, xcb.EVENT_MASK_NO_EVENT, @ptrCast(&event_data));
-    _ = xcb.flush(ctx.conn);
+
     return true;
 }
 
@@ -1707,7 +1719,7 @@ pub fn grabKeys(ctx: *EventContext, cfg: *const config_mod.Config) void {
         _ = xcb.grabKey(ctx.conn, 1, ctx.root_window, xmods | xcb.MOD_MASK_LOCK | xcb.MOD_MASK_2, keycode, xcb.GRAB_MODE_ASYNC, xcb.GRAB_MODE_ASYNC);
     }
 
-    _ = xcb.flush(ctx.conn);
+
 }
 
 /// Convert a key name string to an X11 keysym using xkb_keysym_from_name.

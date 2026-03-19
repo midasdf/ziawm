@@ -119,77 +119,16 @@ pub fn main() !void {
     // Discover socket path
     var default_path_buf: [256]u8 = undefined;
     const default_path = ipc.getDefaultSocketPath(&default_path_buf);
-
     const sock_path = discoverSocket(socket_override) orelse default_path;
 
-    // Connect
-    var addr: std.posix.sockaddr.un = .{ .path = undefined };
-    addr.family = std.posix.AF.UNIX;
-    @memset(&addr.path, 0);
-    if (sock_path.len > addr.path.len) {
-        std.debug.print("ERROR: socket path too long\n", .{});
-        return;
-    }
-    @memcpy(addr.path[0..sock_path.len], sock_path);
-
-    const fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0) catch {
-        std.debug.print("ERROR: cannot create socket\n", .{});
+    // Send request and get response using shared IPC helper
+    const response = ipc.sendRequest(allocator, sock_path, msg_type, payload) orelse {
+        std.debug.print("ERROR: IPC request failed (cannot connect to {s})\n", .{sock_path});
         return;
     };
-    defer std.posix.close(fd);
-
-    std.posix.connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) catch {
-        std.debug.print("ERROR: cannot connect to {s}\n", .{sock_path});
-        return;
-    };
-
-    // Send message
-    var send_buf: [4096 + ipc.HEADER_SIZE]u8 = undefined;
-    const msg = ipc.encode(msg_type, payload, &send_buf);
-    _ = std.posix.write(fd, msg) catch {
-        std.debug.print("ERROR: write failed\n", .{});
-        return;
-    };
-
-    // Read response
-    var recv_buf: [65536]u8 = undefined;
-    var total_read: usize = 0;
-
-    // Read header first
-    while (total_read < ipc.HEADER_SIZE) {
-        const n = std.posix.read(fd, recv_buf[total_read..]) catch {
-            std.debug.print("ERROR: read failed\n", .{});
-            return;
-        };
-        if (n == 0) {
-            std.debug.print("ERROR: connection closed\n", .{});
-            return;
-        }
-        total_read += n;
-    }
-
-    const hdr = ipc.decodeHeader(recv_buf[0..ipc.HEADER_SIZE]) orelse {
-        std.debug.print("ERROR: invalid response header\n", .{});
-        return;
-    };
-
-    const total_needed = ipc.HEADER_SIZE + @as(usize, hdr.payload_len);
-    if (total_needed > recv_buf.len) {
-        std.debug.print("ERROR: response too large\n", .{});
-        return;
-    }
-
-    while (total_read < total_needed) {
-        const n = std.posix.read(fd, recv_buf[total_read..total_needed]) catch {
-            std.debug.print("ERROR: read failed\n", .{});
-            return;
-        };
-        if (n == 0) break;
-        total_read += n;
-    }
+    defer allocator.free(response);
 
     // Print response payload to stdout
-    const response_payload = recv_buf[ipc.HEADER_SIZE..total_needed];
-    _ = std.posix.write(std.posix.STDOUT_FILENO, response_payload) catch {};
+    _ = std.posix.write(std.posix.STDOUT_FILENO, response) catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
 }

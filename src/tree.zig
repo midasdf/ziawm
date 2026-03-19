@@ -40,6 +40,7 @@ pub const WorkspaceData = struct {
 pub const ChildList = struct {
     first: ?*Container = null,
     last: ?*Container = null,
+    count: usize = 0,
 
     /// Append a node to the end of the list. Node must already have parent set.
     pub fn append(self: *ChildList, node: *Container) void {
@@ -49,12 +50,12 @@ pub const ChildList = struct {
             node.next = null;
             self.last = node;
         } else {
-            // List was empty
             node.prev = null;
             node.next = null;
             self.first = node;
             self.last = node;
         }
+        self.count += 1;
     }
 
     /// Prepend a node to the front of the list. Node must already have parent set.
@@ -70,6 +71,7 @@ pub const ChildList = struct {
             self.first = node;
             self.last = node;
         }
+        self.count += 1;
     }
 
     /// Insert `node` before `ref` in the list. `ref` must be in this list.
@@ -80,10 +82,10 @@ pub const ChildList = struct {
         if (ref.prev) |prev| {
             prev.next = node;
         } else {
-            // ref was the first element
             self.first = node;
         }
         ref.prev = node;
+        self.count += 1;
     }
 
     /// Remove a node from the list without freeing it.
@@ -100,16 +102,12 @@ pub const ChildList = struct {
         }
         node.prev = null;
         node.next = null;
+        self.count -= 1;
     }
 
-    /// Count elements in the list.
+    /// O(1) count of elements.
     pub fn len(self: *const ChildList) usize {
-        var count: usize = 0;
-        var cur = self.first;
-        while (cur) |node| : (cur = node.next) {
-            count += 1;
-        }
-        return count;
+        return self.count;
     }
 };
 
@@ -130,7 +128,7 @@ pub const Container = struct {
     is_focused: bool = false,
     is_scratchpad: bool = false,
     dirty: bool = true,
-    marks: [8]?[]const u8 = .{null} ** 8,
+    marks: [4]?[]const u8 = .{null} ** 4,
     mark_count: u8 = 0,
 
     /// Allocate and initialise a new container of the given type.
@@ -239,7 +237,7 @@ pub const Container = struct {
                 if (std.mem.eql(u8, m, mark)) return error.DuplicateMark;
             }
         }
-        if (self.mark_count >= 8) return error.MarksCapacityExceeded;
+        if (self.mark_count >= 4) return error.MarksCapacityExceeded;
         self.marks[self.mark_count] = mark;
         self.mark_count += 1;
     }

@@ -181,6 +181,56 @@ fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
     }
 }
 
+// --- Client-side IPC ---
+
+/// Connect to the IPC server. Returns socket fd on success.
+pub fn connectToServer(sock_path: []const u8) !std.posix.fd_t {
+    var addr: std.posix.sockaddr.un = .{ .path = undefined };
+    addr.family = std.posix.AF.UNIX;
+    @memset(&addr.path, 0);
+    if (sock_path.len > addr.path.len) return error.NameTooLong;
+    @memcpy(addr.path[0..sock_path.len], sock_path);
+
+    const fd = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0);
+    errdefer std.posix.close(fd);
+
+    try std.posix.connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un));
+    return fd;
+}
+
+/// Send a request and read the full response. Caller owns returned slice.
+pub fn sendRequest(allocator: std.mem.Allocator, sock_path: []const u8, msg_type: MessageType, payload: []const u8) ?[]u8 {
+    const fd = connectToServer(sock_path) catch return null;
+    defer std.posix.close(fd);
+
+    // Send
+    var send_buf: [4096 + HEADER_SIZE]u8 = undefined;
+    const msg = encode(msg_type, payload, &send_buf);
+    _ = std.posix.write(fd, msg) catch return null;
+
+    // Read response
+    var recv_buf: [65536]u8 = undefined;
+    var total_read: usize = 0;
+
+    while (total_read < HEADER_SIZE) {
+        const n = std.posix.read(fd, recv_buf[total_read..]) catch return null;
+        if (n == 0) return null;
+        total_read += n;
+    }
+
+    const hdr = decodeHeader(recv_buf[0..HEADER_SIZE]) orelse return null;
+    const total_needed = HEADER_SIZE + @as(usize, hdr.payload_len);
+    if (total_needed > recv_buf.len) return null;
+
+    while (total_read < total_needed) {
+        const n = std.posix.read(fd, recv_buf[total_read..total_needed]) catch return null;
+        if (n == 0) break;
+        total_read += n;
+    }
+
+    return allocator.dupe(u8, recv_buf[HEADER_SIZE..total_needed]) catch null;
+}
+
 /// Write a response to client fd.
 pub fn writeResponse(fd: std.posix.fd_t, msg_type: u32, payload: []const u8) !void {
     // Write header

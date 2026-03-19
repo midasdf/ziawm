@@ -352,7 +352,7 @@ fn refreshWorkspaces(
     ws_count: *usize,
 ) void {
     // Connect to IPC and send GET_WORKSPACES
-    const response = sendIpcRequest(allocator, sock_path, .get_workspaces, "") orelse return;
+    const response = ipc.sendRequest(allocator, sock_path, .get_workspaces, "") orelse return;
     defer allocator.free(response);
 
     // Parse JSON response (simple manual parsing)
@@ -390,48 +390,8 @@ fn refreshWorkspaces(
 }
 
 fn sendIpcCommand(allocator: std.mem.Allocator, sock_path: []const u8, command: []const u8) void {
-    _ = sendIpcRequest(allocator, sock_path, .run_command, command) orelse return;
-}
-
-fn sendIpcRequest(allocator: std.mem.Allocator, sock_path: []const u8, msg_type: ipc.MessageType, payload: []const u8) ?[]u8 {
-    // Connect
-    var addr: std.posix.sockaddr.un = .{ .path = undefined };
-    addr.family = std.posix.AF.UNIX;
-    @memset(&addr.path, 0);
-    if (sock_path.len > addr.path.len) return null;
-    @memcpy(addr.path[0..sock_path.len], sock_path);
-
-    const fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0) catch return null;
-    defer std.posix.close(fd);
-
-    std.posix.connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) catch return null;
-
-    // Send
-    var send_buf: [4096 + ipc.HEADER_SIZE]u8 = undefined;
-    const msg = ipc.encode(msg_type, payload, &send_buf);
-    _ = std.posix.write(fd, msg) catch return null;
-
-    // Read response
-    var recv_buf: [65536]u8 = undefined;
-    var total_read: usize = 0;
-
-    while (total_read < ipc.HEADER_SIZE) {
-        const n = std.posix.read(fd, recv_buf[total_read..]) catch return null;
-        if (n == 0) return null;
-        total_read += n;
-    }
-
-    const hdr = ipc.decodeHeader(recv_buf[0..ipc.HEADER_SIZE]) orelse return null;
-    const total_needed = ipc.HEADER_SIZE + @as(usize, hdr.payload_len);
-    if (total_needed > recv_buf.len) return null;
-
-    while (total_read < total_needed) {
-        const n = std.posix.read(fd, recv_buf[total_read..total_needed]) catch return null;
-        if (n == 0) break;
-        total_read += n;
-    }
-
-    return allocator.dupe(u8, recv_buf[ipc.HEADER_SIZE..total_needed]) catch null;
+    const resp = ipc.sendRequest(allocator, sock_path, .run_command, command) orelse return;
+    allocator.free(resp);
 }
 
 fn internAtom(conn: *c.xcb_connection_t, name: [*:0]const u8) u32 {

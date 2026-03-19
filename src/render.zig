@@ -58,11 +58,30 @@ fn applyRecursive(
             const hide_unfocused = (con.layout == .tabbed or con.layout == .stacked) and
                 con.children.len() > 1;
 
-            // First pass: tiling children
+            // Single pass: process tiling, collect floating/fullscreen for deferred rendering
+            var floating_buf: [32]*tree.Container = undefined;
+            var floating_count: usize = 0;
+            var fullscreen_buf: [8]*tree.Container = undefined;
+            var fullscreen_count: usize = 0;
+
             var cur = con.children.first;
             while (cur) |child| : (cur = child.next) {
-                if (child.is_floating) continue;
+                if (child.is_fullscreen != .none) {
+                    if (fullscreen_count < 8) {
+                        fullscreen_buf[fullscreen_count] = child;
+                        fullscreen_count += 1;
+                    }
+                    continue;
+                }
+                if (child.is_floating) {
+                    if (floating_count < 32) {
+                        floating_buf[floating_count] = child;
+                        floating_count += 1;
+                    }
+                    continue;
+                }
 
+                // Tiling child
                 if (hide_unfocused) {
                     const show = child.is_focused or (!anyTilingChildFocused(con) and isFirstTilingChild(con, child));
                     if (show) {
@@ -76,19 +95,14 @@ fn applyRecursive(
                 }
             }
 
-            // Second pass: floating children (always rendered on top)
-            cur = con.children.first;
-            while (cur) |child| : (cur = child.next) {
-                if (!child.is_floating) continue;
+            // Render floating children (on top of tiling)
+            for (floating_buf[0..floating_count]) |child| {
                 applyRecursive(conn, child, border_focus_color, border_unfocus_color);
             }
 
-            // Third pass: fullscreen children rendered last (on top of everything)
-            cur = con.children.first;
-            while (cur) |child| : (cur = child.next) {
-                if (child.is_fullscreen != .none) {
-                    applyFullscreen(conn, child, con);
-                }
+            // Render fullscreen children last (on top of everything)
+            for (fullscreen_buf[0..fullscreen_count]) |child| {
+                applyFullscreen(conn, child, con);
             }
         },
     }
