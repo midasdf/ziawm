@@ -19,6 +19,7 @@ pub const WindowData = struct {
     instance: []const u8 = "",
     title: []const u8 = "",
     window_role: []const u8 = "",
+    window_type: []const u8 = "",
     transient_for: ?u32 = null,
     urgency: bool = false,
 };
@@ -156,6 +157,7 @@ pub const Container = struct {
             freeOwnedString(alloc, wd.instance);
             freeOwnedString(alloc, wd.title);
             freeOwnedString(alloc, wd.window_role);
+            freeOwnedString(alloc, wd.window_type);
         }
         // Free allocator-owned workspace name
         if (self.workspace) |wsd| {

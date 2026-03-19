@@ -6,7 +6,14 @@ pub const c = @cImport({
     @cInclude("xcb/xcb_keysyms.h");
     @cInclude("xcb/randr.h");
     @cInclude("xcb/xkb.h");
+    @cInclude("xkbcommon/xkbcommon.h");
 });
+
+// --- xkbcommon wrappers ---
+pub const xkb_keysym_from_name = c.xkb_keysym_from_name;
+pub const xkb_keysym_get_name = c.xkb_keysym_get_name;
+pub const XKB_KEYSYM_NO_FLAGS = c.XKB_KEYSYM_NO_FLAGS;
+pub const XKB_KEYSYM_CASE_INSENSITIVE = c.XKB_KEYSYM_CASE_INSENSITIVE;
 
 // --- Core types ---
 pub const Connection = c.xcb_connection_t;

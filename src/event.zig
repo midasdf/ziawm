@@ -394,6 +394,26 @@ fn readTransientFor(conn: *xcb.Connection, window: xcb.Window) ?u32 {
     return win;
 }
 
+/// Read _NET_WM_WINDOW_TYPE and return a type name string ("normal", "dialog",
+/// "splash", "notification", "toolbar", "menu", "utility", "dock", or "").
+/// Caller owns the returned allocator string (free if len > 0).
+fn readWindowTypeName(allocator: std.mem.Allocator, conn: *xcb.Connection, window: xcb.Window, atoms: atoms_mod.Atoms) []const u8 {
+    const cookie = xcb.getProperty(conn, 0, window, atoms.net_wm_window_type, xcb.ATOM_ATOM, 0, 32);
+    const reply = xcb.getPropertyReply(conn, cookie, null) orelse return "";
+    defer std.c.free(reply);
+    const len = xcb.getPropertyValueLength(reply);
+    if (len <= 0) return "";
+    const ptr = xcb.getPropertyValue(reply) orelse return "";
+    const atom_ptr: [*]const xcb.Atom = @ptrCast(@alignCast(ptr));
+    const count: usize = @intCast(@divTrunc(len, 4));
+    if (count == 0) return "";
+    // Use the first (highest priority) type atom
+    const type_atom = atom_ptr[0];
+    const type_name: []const u8 = if (type_atom == atoms.net_wm_window_type_normal) "normal" else if (type_atom == atoms.net_wm_window_type_dialog) "dialog" else if (type_atom == atoms.net_wm_window_type_splash) "splash" else if (type_atom == atoms.net_wm_window_type_notification) "notification" else if (type_atom == atoms.net_wm_window_type_toolbar) "toolbar" else if (type_atom == atoms.net_wm_window_type_menu) "menu" else if (type_atom == atoms.net_wm_window_type_utility) "utility" else if (type_atom == atoms.net_wm_window_type_dock) "dock" else "";
+    if (type_name.len == 0) return "";
+    return allocator.dupe(u8, type_name) catch "";
+}
+
 /// Check _NET_WM_WINDOW_TYPE for dialog/splash/notification types.
 fn shouldFloatByType(conn: *xcb.Connection, window: xcb.Window, atoms: atoms_mod.Atoms) bool {
     const cookie = xcb.getProperty(conn, 0, window, atoms.net_wm_window_type, xcb.ATOM_ATOM, 0, 32);
@@ -421,9 +441,11 @@ fn freeWindowStrings(allocator: std.mem.Allocator, con: *tree.Container) void {
         if (wd.class.len > 0) allocator.free(wd.class);
         if (wd.instance.len > 0) allocator.free(wd.instance);
         if (wd.title.len > 0) allocator.free(wd.title);
+        if (wd.window_type.len > 0) allocator.free(wd.window_type);
         wd.class = "";
         wd.instance = "";
         wd.title = "";
+        wd.window_type = "";
     }
 }
 
@@ -455,6 +477,7 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     const wm_class = readWmClass(ctx.allocator, ctx.conn, window);
     const title = readTitle(ctx.allocator, ctx.conn, window, ctx.atoms);
     const transient = readTransientFor(ctx.conn, window);
+    const win_type = readWindowTypeName(ctx.allocator, ctx.conn, window, ctx.atoms);
     var should_float = transient != null;
     if (!should_float) {
         should_float = shouldFloatByType(ctx.conn, window, ctx.atoms);
@@ -465,6 +488,7 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
         .class = wm_class.class,
         .instance = wm_class.instance,
         .title = title,
+        .window_type = win_type,
         .transient_for = transient,
     };
     con.is_floating = should_float;
@@ -628,60 +652,12 @@ fn handleKeyPress(ctx: *EventContext, ev: *xcb.KeyPressEvent) void {
     }
 }
 
-/// Convert a keysym value to its name string (e.g., 0xff0d -> "Return").
+/// Convert a keysym value to its name string using xkb_keysym_get_name.
+/// buf must be at least 64 bytes. Returns null if keysym is unknown.
 fn keysymToName(keysym: xcb.Keysym, buf: *[64]u8) ?[]const u8 {
-    // Common keysyms
-    const mapping = .{
-        .{ 0xff0d, "Return" },
-        .{ 0xff1b, "Escape" },
-        .{ 0xff09, "Tab" },
-        .{ 0xffbe, "F1" },
-        .{ 0xffbf, "F2" },
-        .{ 0xffc0, "F3" },
-        .{ 0xffc1, "F4" },
-        .{ 0xffc2, "F5" },
-        .{ 0xffc3, "F6" },
-        .{ 0xffc4, "F7" },
-        .{ 0xffc5, "F8" },
-        .{ 0xffc6, "F9" },
-        .{ 0xffc7, "F10" },
-        .{ 0xffc8, "F11" },
-        .{ 0xffc9, "F12" },
-        .{ 0xff08, "BackSpace" },
-        .{ 0xffff, "Delete" },
-        .{ 0xff50, "Home" },
-        .{ 0xff57, "End" },
-        .{ 0xff55, "Prior" }, // Page Up
-        .{ 0xff56, "Next" }, // Page Down
-        .{ 0xff51, "Left" },
-        .{ 0xff52, "Up" },
-        .{ 0xff53, "Right" },
-        .{ 0xff54, "Down" },
-        .{ 0xff63, "Insert" },
-        .{ 0xff13, "Pause" },
-        .{ 0xff14, "Scroll_Lock" },
-        .{ 0xff61, "Print" },
-        .{ 0x0020, "space" },
-        .{ 0xff8d, "KP_Enter" },
-    };
-
-    inline for (mapping) |entry| {
-        if (keysym == entry[0]) return entry[1];
-    }
-
-    // Printable ASCII
-    if (keysym >= 0x20 and keysym <= 0x7e) {
-        buf[0] = @intCast(keysym);
-        return buf[0..1];
-    }
-
-    // Number keys 0-9
-    if (keysym >= 0x30 and keysym <= 0x39) {
-        buf[0] = @intCast(keysym);
-        return buf[0..1];
-    }
-
-    return null;
+    const n = xcb.xkb_keysym_get_name(keysym, buf, buf.len);
+    if (n <= 0) return null;
+    return buf[0..@intCast(n)];
 }
 
 fn handleEnterNotify(ctx: *EventContext, ev: *xcb.EnterNotifyEvent) void {
@@ -1387,64 +1363,16 @@ pub fn grabKeys(ctx: *EventContext, cfg: *const config_mod.Config) void {
     _ = xcb.flush(ctx.conn);
 }
 
-/// Convert a key name string to an X11 keysym.
+/// Convert a key name string to an X11 keysym using xkb_keysym_from_name.
+/// Returns 0 (XKB_KEY_NoSymbol) if not found.
 fn nameToKeysym(name: []const u8) xcb.Keysym {
-    // Common key names
-    const mapping = .{
-        .{ "Return", 0xff0d },
-        .{ "Escape", 0xff1b },
-        .{ "Tab", 0xff09 },
-        .{ "F1", 0xffbe },
-        .{ "F2", 0xffbf },
-        .{ "F3", 0xffc0 },
-        .{ "F4", 0xffc1 },
-        .{ "F5", 0xffc2 },
-        .{ "F6", 0xffc3 },
-        .{ "F7", 0xffc4 },
-        .{ "F8", 0xffc5 },
-        .{ "F9", 0xffc6 },
-        .{ "F10", 0xffc7 },
-        .{ "F11", 0xffc8 },
-        .{ "F12", 0xffc9 },
-        .{ "BackSpace", 0xff08 },
-        .{ "Delete", 0xffff },
-        .{ "Home", 0xff50 },
-        .{ "End", 0xff57 },
-        .{ "Prior", 0xff55 },
-        .{ "Next", 0xff56 },
-        .{ "Left", 0xff51 },
-        .{ "Up", 0xff52 },
-        .{ "Right", 0xff53 },
-        .{ "Down", 0xff54 },
-        .{ "Insert", 0xff63 },
-        .{ "Pause", 0xff13 },
-        .{ "Scroll_Lock", 0xff14 },
-        .{ "Print", 0xff61 },
-        .{ "space", 0x0020 },
-        .{ "KP_Enter", 0xff8d },
-        .{ "minus", 0x002d },
-        .{ "plus", 0x002b },
-        .{ "equal", 0x003d },
-        .{ "bracketleft", 0x005b },
-        .{ "bracketright", 0x005d },
-        .{ "semicolon", 0x003b },
-        .{ "apostrophe", 0x0027 },
-        .{ "grave", 0x0060 },
-        .{ "backslash", 0x005c },
-        .{ "comma", 0x002c },
-        .{ "period", 0x002e },
-        .{ "slash", 0x002f },
-    };
-
-    inline for (mapping) |entry| {
-        if (std.mem.eql(u8, name, entry[0])) return entry[1];
-    }
-
-    // Single ASCII character
-    if (name.len == 1) {
-        const ch = name[0];
-        if (ch >= 0x20 and ch <= 0x7e) return @intCast(ch);
-    }
-
-    return 0;
+    // xkb_keysym_from_name requires a null-terminated string.
+    var buf: [128]u8 = undefined;
+    if (name.len >= buf.len) return 0;
+    @memcpy(buf[0..name.len], name);
+    buf[name.len] = 0;
+    const ks = xcb.xkb_keysym_from_name(@ptrCast(&buf), xcb.XKB_KEYSYM_NO_FLAGS);
+    // XKB_KEY_NoSymbol == 0xFFFFFFFF in some headers; also 0 means not found.
+    if (ks == xcb.c.XKB_KEY_NoSymbol) return 0;
+    return @intCast(ks);
 }

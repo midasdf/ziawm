@@ -9,6 +9,7 @@ pub const Criteria = struct {
     con_mark: ?[]const u8 = null,
     floating: ?bool = null,
     workspace: ?[]const u8 = null,
+    window_type: ?[]const u8 = null,
 };
 
 /// Parse "[class=\"Firefox\" title=\"Git*\"]" into Criteria.
@@ -66,6 +67,8 @@ pub fn parse(input: []const u8) ?Criteria {
             // unknown value: ignore
         } else if (std.mem.eql(u8, key, "workspace")) {
             crit.workspace = value;
+        } else if (std.mem.eql(u8, key, "window_type")) {
+            crit.window_type = value;
         }
         // Unknown keys: silently ignored
     }
@@ -109,9 +112,9 @@ pub fn globMatch(pattern: []const u8, text: []const u8) bool {
 /// Check if a container matches criteria.
 /// Each non-null criteria field must match. If all match, return true.
 pub fn matches(crit: *const Criteria, con: *const tree.Container) bool {
-    // class / instance / title / window_role require WindowData
+    // class / instance / title / window_role / window_type require WindowData
     if (crit.class != null or crit.instance != null or
-        crit.title != null or crit.window_role != null)
+        crit.title != null or crit.window_role != null or crit.window_type != null)
     {
         const wd = con.window orelse return false;
 
@@ -126,6 +129,9 @@ pub fn matches(crit: *const Criteria, con: *const tree.Container) bool {
         }
         if (crit.window_role) |pat| {
             if (!globMatch(pat, wd.window_role)) return false;
+        }
+        if (crit.window_type) |pat| {
+            if (!globMatch(pat, wd.window_type)) return false;
         }
     }
 

@@ -42,7 +42,7 @@ fn handleIpcMessage(ctx: *event.EventContext, client_fd: std.posix.fd_t, msg_typ
             break :blk "[{\"success\":false,\"error\":\"invalid command\"}]";
         },
         @intFromEnum(ipc.MessageType.get_workspaces) => buildWorkspacesJson(ctx, &dyn_buf),
-        @intFromEnum(ipc.MessageType.get_outputs) => "[]",
+        @intFromEnum(ipc.MessageType.get_outputs) => buildOutputsJson(ctx, &dyn_buf),
         @intFromEnum(ipc.MessageType.get_tree) => buildTreeJson(ctx, &dyn_buf),
         @intFromEnum(ipc.MessageType.get_marks) => "[]",
         @intFromEnum(ipc.MessageType.get_bar_config) => "{}",
@@ -111,6 +111,77 @@ fn buildWorkspacesJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
                 ws.rect.h,
             }) catch return "[]";
         }
+    }
+
+    w.writeByte(']') catch return "[]";
+    return fbs.getWritten();
+}
+
+/// Build JSON for GET_OUTPUTS response.
+fn buildOutputsJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
+    var fbs = std.io.fixedBufferStream(buf);
+    const w = fbs.writer();
+    w.writeByte('[') catch return "[]";
+
+    var first = true;
+    var out_cur = ctx.tree_root.children.first;
+    while (out_cur) |out_con| : (out_cur = out_con.next) {
+        if (out_con.type != .output) continue;
+        if (!first) w.writeByte(',') catch return "[]";
+        first = false;
+
+        // Determine the currently focused workspace name on this output
+        var ws_name: []const u8 = "";
+        var ws_cur = out_con.children.first;
+        // Find focused workspace, fall back to first workspace
+        var fallback_ws: ?[]const u8 = null;
+        while (ws_cur) |ws| : (ws_cur = ws.next) {
+            if (ws.type != .workspace) continue;
+            const name = if (ws.workspace) |wsd| wsd.name else "?";
+            if (fallback_ws == null) fallback_ws = name;
+            if (ws.is_focused) {
+                ws_name = name;
+                break;
+            }
+        }
+        if (ws_name.len == 0) {
+            ws_name = fallback_ws orelse "";
+        }
+
+        // Output name: use stored name if available, else "default"
+        const out_name = if (out_con.workspace) |wsd| wsd.output_name else "default";
+        const display_name = if (out_name.len > 0) out_name else "default";
+
+        const is_primary = first; // first output is primary
+        _ = is_primary;
+
+        std.fmt.format(w,
+            "{{\"name\":\"{s}\",\"active\":true,\"primary\":{},\"rect\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}},\"current_workspace\":\"",
+            .{
+                display_name,
+                out_cur == ctx.tree_root.children.first, // first output = primary
+                out_con.rect.x,
+                out_con.rect.y,
+                out_con.rect.w,
+                out_con.rect.h,
+            },
+        ) catch return "[]";
+        // JSON-escape workspace name
+        for (ws_name) |ch| {
+            switch (ch) {
+                '"' => w.writeAll("\\\"") catch return "[]",
+                '\\' => w.writeAll("\\\\") catch return "[]",
+                else => {
+                    if (ch >= 0x20) w.writeByte(ch) catch return "[]";
+                },
+            }
+        }
+        w.writeAll("\"}}") catch return "[]";
+    }
+
+    // If no outputs in tree, return a single default entry
+    if (first) {
+        return "[{\"name\":\"default\",\"active\":true,\"primary\":true,\"rect\":{\"x\":0,\"y\":0,\"width\":720,\"height\":720},\"current_workspace\":\"1\"}]";
     }
 
     w.writeByte(']') catch return "[]";

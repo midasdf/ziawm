@@ -150,9 +150,11 @@ fn applyTabbed(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u
 }
 
 fn applyStacked(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u32) void {
-    // Same as tabbed: 16px title bar area at top
-    const content_y: i32 = rect.y + TAB_BAR_HEIGHT;
-    const content_h: u32 = if (rect.h > TAB_BAR_HEIGHT) rect.h - TAB_BAR_HEIGHT else 0;
+    // Stacked: one title bar row per window (TAB_BAR_HEIGHT * n), then the content area.
+    const n: u32 = @intCast(children.len);
+    const header_h: u32 = TAB_BAR_HEIGHT * n;
+    const content_y: i32 = rect.y + @as(i32, @intCast(header_h));
+    const content_h: u32 = if (rect.h > header_h) rect.h - header_h else 0;
     const child_rect: tree.Rect = .{ .x = rect.x, .y = content_y, .w = rect.w, .h = content_h };
 
     for (children) |child| {

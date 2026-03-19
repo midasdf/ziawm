@@ -229,7 +229,7 @@ test "floating children excluded from tiling" {
     try std.testing.expectEqual(@as(u32, 0), floater.rect.w);
 }
 
-test "stacked layout: all children same rect with 16px offset" {
+test "stacked layout: header scales with children count (16px per window)" {
     const alloc = std.testing.allocator;
     const ws = try makeWs(alloc, 800, 600);
     defer ws.destroy(alloc);
@@ -242,9 +242,10 @@ test "stacked layout: all children same rect with 16px offset" {
 
     layout.apply(ws, 0, 0);
 
+    // 2 children → header = 16 * 2 = 32px; content starts at y=32, h=568
     for ([_]*Container{ c1, c2 }) |child| {
-        try std.testing.expectEqual(@as(i32, 16), child.rect.y);
-        try std.testing.expectEqual(@as(u32, 584), child.rect.h);
+        try std.testing.expectEqual(@as(i32, 32), child.rect.y);
+        try std.testing.expectEqual(@as(u32, 568), child.rect.h);
         try std.testing.expectEqual(@as(u32, 800), child.rect.w);
     }
 }
