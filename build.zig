@@ -80,6 +80,16 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Criteria module (pure Zig, depends on tree)
+    const criteria_mod = b.createModule(.{
+        .root_source_file = b.path("src/criteria.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "tree", .module = tree_mod },
+        },
+    });
+
     // --- Test step ---
     const test_step = b.step("test", "Run tests");
 
@@ -96,6 +106,21 @@ pub fn build(b: *std.Build) void {
     });
     const run_tree_tests = b.addRunArtifact(tree_tests);
     test_step.dependOn(&run_tree_tests.step);
+
+    // criteria tests
+    const criteria_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_criteria.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "tree", .module = tree_mod },
+                .{ .name = "criteria", .module = criteria_mod },
+            },
+        }),
+    });
+    const run_criteria_tests = b.addRunArtifact(criteria_tests);
+    test_step.dependOn(&run_criteria_tests.step);
 
     // layout tests
     const layout_tests = b.addTest(.{
