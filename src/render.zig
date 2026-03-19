@@ -100,7 +100,8 @@ fn applyWindow(
     border_focus_color: u32,
     border_unfocus_color: u32,
 ) void {
-    const win_data = con.window orelse return;
+    if (con.window == null) return;
+    const win_id = con.window.?.id;
 
     // Fullscreen windows are handled separately by applyFullscreen
     if (con.is_fullscreen != .none) return;
@@ -116,20 +117,23 @@ fn applyWindow(
     };
     const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
         xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
-    _ = xcb.configureWindow(conn, win_data.id, mask, &values);
+    _ = xcb.configureWindow(conn, win_id, mask, &values);
 
     // Set border color based on focus
     const color = if (con.is_focused) border_focus_color else border_unfocus_color;
     const border_values = [_]u32{color};
-    _ = xcb.changeWindowAttributes(conn, win_data.id, xcb.CW_BORDER_PIXEL, &border_values);
+    _ = xcb.changeWindowAttributes(conn, win_id, xcb.CW_BORDER_PIXEL, &border_values);
 
     // Ensure the window is mapped
-    _ = xcb.mapWindow(conn, win_data.id);
+    _ = xcb.mapWindow(conn, win_id);
+    con.window.?.mapped = true;
+    con.window.?.pending_unmap = 0; // Reset stale unmap counter on map
 }
 
 /// Render a fullscreen window: fill entire output, no border, raise above all.
 fn applyFullscreen(conn: *xcb.Connection, con: *tree.Container, parent_con: *tree.Container) void {
-    const win_data = con.window orelse return;
+    if (con.window == null) return;
+    const win_id = con.window.?.id;
 
     // Use parent's rect (output or workspace rect) for fullscreen
     const r = parent_con.rect;
@@ -146,16 +150,20 @@ fn applyFullscreen(conn: *xcb.Connection, con: *tree.Container, parent_con: *tre
     const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
         xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT |
         xcb.CONFIG_WINDOW_BORDER_WIDTH | xcb.CONFIG_WINDOW_STACK_MODE;
-    _ = xcb.configureWindow(conn, win_data.id, mask, &values);
+    _ = xcb.configureWindow(conn, win_id, mask, &values);
 
-    _ = xcb.mapWindow(conn, win_data.id);
+    _ = xcb.mapWindow(conn, win_id);
+    con.window.?.mapped = true;
+    con.window.?.pending_unmap = 0; // Reset stale unmap counter on map
 }
 
 /// Map all windows in a subtree.
 fn mapSubtree(conn: *xcb.Connection, con: *tree.Container) void {
     if (con.type == .window) {
-        if (con.window) |win_data| {
+        if (con.window) |*win_data| {
             _ = xcb.mapWindow(conn, win_data.id);
+            win_data.mapped = true;
+            win_data.pending_unmap = 0; // Reset stale unmap counter on map
         }
         return;
     }
@@ -184,10 +192,16 @@ fn isFirstTilingChild(con: *tree.Container, child: *tree.Container) bool {
 }
 
 /// Unmap all windows in a subtree.
+/// Only unmaps windows that are currently mapped (tracked by WindowData.mapped).
+/// Increments pending_unmap counter so UnmapNotify from WM-initiated unmaps is ignored.
 pub fn unmapSubtree(conn: *xcb.Connection, con: *tree.Container) void {
     if (con.type == .window) {
-        if (con.window) |win_data| {
-            _ = xcb.unmapWindow(conn, win_data.id);
+        if (con.window) |*win_data| {
+            if (win_data.mapped) {
+                _ = xcb.unmapWindow(conn, win_data.id);
+                win_data.pending_unmap +|= 1;
+                win_data.mapped = false;
+            }
         }
         return;
     }

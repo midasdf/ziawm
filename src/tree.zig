@@ -22,6 +22,13 @@ pub const WindowData = struct {
     window_type: []const u8 = "",
     transient_for: ?u32 = null,
     urgency: bool = false,
+    /// Counter for WM-initiated unmaps. Incremented when the WM calls xcb_unmap_window,
+    /// decremented when UnmapNotify arrives. If > 0, the unmap was WM-initiated and
+    /// should be ignored (not treated as client destroy).
+    pending_unmap: u16 = 0,
+    /// Whether the WM considers this window to be in a mapped state.
+    /// Used to avoid redundant unmap calls and counter drift.
+    mapped: bool = true,
 };
 
 pub const WorkspaceData = struct {

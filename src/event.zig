@@ -616,8 +616,23 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
 }
 
 fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
+    // Only process SubstructureNotify events (from root window).
+    // Skip StructureNotify events (from the window itself) to avoid double-processing.
+    // When ev.event == ev.window, it's StructureNotify on the window itself.
+    if (ev.event == ev.window) return;
+
     const con = findContainerByWindow(ctx.tree_root, ev.window) orelse return;
 
+    // Check if this unmap was WM-initiated (e.g. hiding windows in tabbed/stacked mode
+    // or switching workspaces). If so, decrement counter and ignore.
+    if (con.window) |*wd| {
+        if (wd.pending_unmap > 0) {
+            wd.pending_unmap -= 1;
+            return;
+        }
+    }
+
+    // Client-initiated unmap — remove the window from the tree
     // If this was focused, move focus to sibling or parent
     if (con.is_focused) {
         // Try next sibling, then prev sibling, then parent
@@ -638,6 +653,9 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
 }
 
 fn handleDestroyNotify(ctx: *EventContext, ev: *xcb.DestroyNotifyEvent) void {
+    // Only process SubstructureNotify events (from root window).
+    if (ev.event == ev.window) return;
+
     const con = findContainerByWindow(ctx.tree_root, ev.window) orelse return;
 
     if (con.is_focused) {
@@ -894,7 +912,7 @@ pub fn executeCommand(ctx: *EventContext, cmd: command_mod.Command) void {
         .layout_cmd => executeLayout(ctx, cmd),
         .workspace => executeWorkspace(ctx, cmd),
         .move_workspace => executeMoveWorkspace(ctx, cmd),
-        .kill => executeKill(ctx),
+        .kill => executeKill(ctx, cmd),
         .exec => executeExec(cmd),
         .floating => executeFloating(ctx),
         .fullscreen => executeFullscreen(ctx),
@@ -1194,9 +1212,10 @@ fn executeMoveWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
     }
 }
 
-fn executeKill(ctx: *EventContext) void {
+fn executeKill(ctx: *EventContext, cmd: command_mod.Command) void {
     const focused = getFocusedContainer(ctx.tree_root) orelse return;
-    killWindow(ctx, focused, false);
+    const force = if (cmd.args[0]) |arg| std.mem.eql(u8, arg, "kill") else false;
+    killWindow(ctx, focused, force);
 }
 
 fn killWindow(ctx: *EventContext, con: *tree.Container, force: bool) void {

@@ -785,6 +785,11 @@ pub fn main() !void {
     // Remove socket file
     std.posix.unlinkat(std.posix.AT.FDCWD, sock_path, 0) catch {};
 
+    // Free allocator-owned mode string (if not the static DEFAULT_MODE sentinel)
+    if (ctx.current_mode.ptr != event.DEFAULT_MODE.ptr) {
+        allocator.free(ctx.current_mode);
+    }
+
     // Free static buffers
     tree_json_buf.deinit(allocator);
 
