@@ -6,13 +6,40 @@ const tree = @import("tree.zig");
 const output = @import("output.zig");
 const event = @import("event.zig");
 const render = @import("render.zig");
+const ipc = @import("ipc.zig");
 const linux = std.os.linux;
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
 const VERSION = "0.1.0";
 
 // Default border colors (can be overridden by config later)
 const BORDER_FOCUS_COLOR: u32 = 0x4c7899;
 const BORDER_UNFOCUS_COLOR: u32 = 0x333333;
+
+// IPC constants
+const IPC_LISTEN_FD_TAG: i32 = -100; // sentinel for epoll data.fd
+const MAX_IPC_CLIENTS: usize = 16;
+
+fn handleIpcMessage(client_fd: std.posix.fd_t, msg_type: u32, _: []const u8) void {
+    const response: []const u8 = switch (msg_type) {
+        @intFromEnum(ipc.MessageType.get_version) =>
+            "{\"human_readable\":\"ziawm " ++ VERSION ++ "\",\"loaded_config_file_name\":\"\",\"minor\":1,\"major\":0,\"patch\":0}",
+        @intFromEnum(ipc.MessageType.run_command) => "[{\"success\":true}]",
+        @intFromEnum(ipc.MessageType.get_workspaces) => "[]",
+        @intFromEnum(ipc.MessageType.get_outputs) => "[]",
+        @intFromEnum(ipc.MessageType.get_tree) => "{}",
+        @intFromEnum(ipc.MessageType.get_marks) => "[]",
+        @intFromEnum(ipc.MessageType.get_bar_config) => "{}",
+        @intFromEnum(ipc.MessageType.get_config) => "{}",
+        @intFromEnum(ipc.MessageType.get_binding_modes) => "[\"default\"]",
+        @intFromEnum(ipc.MessageType.subscribe) => "{\"success\":true}",
+        @intFromEnum(ipc.MessageType.send_tick) => "{\"success\":true}",
+        else => "{}",
+    };
+
+    ipc.writeResponse(client_fd, msg_type, response) catch {};
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -126,10 +153,46 @@ pub fn main() !void {
 
     _ = xcb.flush(conn);
 
-    std.debug.print("ziawm v{s} started (screen {}x{})\n", .{
+    // 7b. Setup IPC socket
+    var sock_path_buf: [256]u8 = undefined;
+    const sock_path = ipc.getDefaultSocketPath(&sock_path_buf);
+
+    const ipc_listen_fd = ipc.createServer(sock_path) catch |err| {
+        std.debug.print("ERROR: cannot create IPC socket: {}\n", .{err});
+        return err;
+    };
+    defer std.posix.close(ipc_listen_fd);
+
+    // Set I3SOCK env var
+    {
+        var env_buf: [256]u8 = undefined;
+        @memcpy(env_buf[0..sock_path.len], sock_path);
+        env_buf[sock_path.len] = 0;
+        const env_z: [*:0]const u8 = @ptrCast(env_buf[0..sock_path.len :0]);
+        _ = setenv("I3SOCK", env_z, 1);
+    }
+
+    // Set _I3_SOCKET_PATH root window property
+    _ = xcb.changeProperty(
+        conn,
+        xcb.PROP_MODE_REPLACE,
+        root_window,
+        atoms.i3_socket_path,
+        atoms.utf8_string,
+        8,
+        @intCast(sock_path.len),
+        sock_path.ptr,
+    );
+    _ = xcb.flush(conn);
+
+    // IPC client fd tracking
+    var ipc_client_fds: [MAX_IPC_CLIENTS]std.posix.fd_t = .{-1} ** MAX_IPC_CLIENTS;
+
+    std.debug.print("ziawm v{s} started (screen {}x{}, ipc: {s})\n", .{
         VERSION,
         screen.width_in_pixels,
         screen.height_in_pixels,
+        sock_path,
     });
 
     // 8. Setup epoll
@@ -152,7 +215,19 @@ pub fn main() !void {
         return error.EpollCtlFailed;
     }
 
-    // TODO: Add IPC fd to epoll (Task 13)
+    // Add IPC listen fd to epoll
+    var ipc_event = linux.epoll_event{
+        .events = linux.EPOLL.IN,
+        .data = .{ .fd = IPC_LISTEN_FD_TAG },
+    };
+    {
+        const ipc_ctl = linux.epoll_ctl(@intCast(epoll_fd), linux.EPOLL.CTL_ADD, @intCast(ipc_listen_fd), &ipc_event);
+        if (@as(isize, @bitCast(ipc_ctl)) < 0) {
+            std.debug.print("ERROR: epoll_ctl for IPC fd failed\n", .{});
+            return error.EpollCtlFailed;
+        }
+    }
+
     // TODO: Add signalfd to epoll (Task 19)
 
     // 9. Event loop
@@ -196,13 +271,60 @@ pub fn main() !void {
                     break;
                 }
             }
-            // TODO: handle IPC fd (Task 13)
+            if (ev.data.fd == IPC_LISTEN_FD_TAG) {
+                // Accept new IPC client
+                const client_fd = ipc.acceptClient(ipc_listen_fd) catch continue;
+                // Find a slot
+                var added = false;
+                for (&ipc_client_fds) |*slot| {
+                    if (slot.* == -1) {
+                        slot.* = client_fd;
+                        var client_ev = linux.epoll_event{
+                            .events = linux.EPOLL.IN,
+                            .data = .{ .fd = client_fd },
+                        };
+                        _ = linux.epoll_ctl(@intCast(epoll_fd), linux.EPOLL.CTL_ADD, @intCast(client_fd), &client_ev);
+                        added = true;
+                        break;
+                    }
+                }
+                if (!added) {
+                    std.posix.close(client_fd); // too many clients
+                }
+            } else blk: {
+                // Check if this is an IPC client fd
+                for (&ipc_client_fds) |*slot| {
+                    if (slot.* == ev.data.fd) {
+                        var msg_buf: [4096]u8 = undefined;
+                        if (ipc.readMessage(ev.data.fd, &msg_buf)) |msg| {
+                            handleIpcMessage(ev.data.fd, msg.msg_type, msg.payload);
+                        } else {
+                            // Client disconnected or error
+                            _ = linux.epoll_ctl(@intCast(epoll_fd), linux.EPOLL.CTL_DEL, @intCast(ev.data.fd), null);
+                            std.posix.close(ev.data.fd);
+                            slot.* = -1;
+                        }
+                        break :blk;
+                    }
+                }
+            }
             // TODO: handle signalfd (Task 19)
         }
 
         // Re-render after processing events
         render.applyTree(conn, tree_root, BORDER_FOCUS_COLOR, BORDER_UNFOCUS_COLOR);
     }
+
+    // Cleanup IPC clients
+    for (&ipc_client_fds) |*slot| {
+        if (slot.* != -1) {
+            std.posix.close(slot.*);
+            slot.* = -1;
+        }
+    }
+
+    // Remove socket file
+    std.posix.unlinkat(std.posix.AT.FDCWD, sock_path, 0) catch {};
 
     std.debug.print("ziawm shutting down\n", .{});
 }

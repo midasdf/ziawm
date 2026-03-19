@@ -79,3 +79,101 @@ pub fn decodeHeader(buf: []const u8) ?Header {
 pub fn isEvent(msg_type: u32) bool {
     return (msg_type & 0x80000000) != 0;
 }
+
+// --- Server-side IPC ---
+
+/// Get default socket path: /run/user/{uid}/ziawm/ipc.sock
+pub fn getDefaultSocketPath(buf: []u8) []const u8 {
+    const uid = std.os.linux.getuid();
+    const len = (std.fmt.bufPrint(buf, "/run/user/{d}/ziawm/ipc.sock", .{uid}) catch return buf[0..0]).len;
+    return buf[0..len];
+}
+
+/// Create and bind listening UNIX socket. Returns fd.
+pub fn createServer(socket_path: []const u8) !std.posix.fd_t {
+    // Create parent directory
+    if (std.mem.lastIndexOfScalar(u8, socket_path, '/')) |sep| {
+        const dir_path = socket_path[0..sep];
+        std.posix.mkdirat(std.posix.AT.FDCWD, dir_path, 0o700) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => return e,
+        };
+    }
+
+    // Delete stale socket file
+    std.posix.unlinkat(std.posix.AT.FDCWD, socket_path, 0) catch {};
+
+    // Create socket
+    const fd = try std.posix.socket(
+        std.posix.AF.UNIX,
+        std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC,
+        0,
+    );
+    errdefer std.posix.close(fd);
+
+    // Bind
+    var addr: std.posix.sockaddr.un = .{ .path = undefined };
+    addr.family = std.posix.AF.UNIX;
+    @memset(&addr.path, 0);
+    if (socket_path.len > addr.path.len) return error.NameTooLong;
+    @memcpy(addr.path[0..socket_path.len], socket_path);
+
+    try std.posix.bind(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un));
+
+    // Listen
+    try std.posix.listen(fd, 5);
+
+    return fd;
+}
+
+/// Accept a client connection (non-blocking).
+pub fn acceptClient(listen_fd: std.posix.fd_t) !std.posix.fd_t {
+    return try std.posix.accept(listen_fd, null, null, std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC);
+}
+
+/// Read a complete message from client fd into buf.
+/// Returns msg_type + payload slice, or null if incomplete/error.
+pub fn readMessage(fd: std.posix.fd_t, buf: []u8) ?struct { msg_type: u32, payload: []const u8 } {
+    if (buf.len < HEADER_SIZE) return null;
+
+    // Read header
+    var total_read: usize = 0;
+    while (total_read < HEADER_SIZE) {
+        const n = std.posix.read(fd, buf[total_read..]) catch return null;
+        if (n == 0) return null; // EOF
+        total_read += n;
+    }
+
+    // Validate magic
+    const hdr = decodeHeader(buf[0..HEADER_SIZE]) orelse return null;
+
+    const payload_len: usize = @intCast(hdr.payload_len);
+    const total_needed = HEADER_SIZE + payload_len;
+    if (buf.len < total_needed) return null;
+
+    // Read payload
+    while (total_read < total_needed) {
+        const n = std.posix.read(fd, buf[total_read..total_needed]) catch return null;
+        if (n == 0) return null;
+        total_read += n;
+    }
+
+    return .{
+        .msg_type = hdr.msg_type,
+        .payload = buf[HEADER_SIZE..total_needed],
+    };
+}
+
+/// Write a response to client fd.
+pub fn writeResponse(fd: std.posix.fd_t, msg_type: u32, payload: []const u8) !void {
+    // Write header
+    var hdr_buf: [HEADER_SIZE]u8 = undefined;
+    @memcpy(hdr_buf[0..6], MAGIC);
+    std.mem.writeInt(u32, hdr_buf[6..10], @intCast(payload.len), .little);
+    std.mem.writeInt(u32, hdr_buf[10..14], msg_type, .little);
+
+    _ = try std.posix.write(fd, &hdr_buf);
+    if (payload.len > 0) {
+        _ = try std.posix.write(fd, payload);
+    }
+}
