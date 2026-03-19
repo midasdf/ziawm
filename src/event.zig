@@ -1253,12 +1253,15 @@ fn executeScratchpad(ctx: *EventContext, cmd: command_mod.Command) void {
     }
 }
 
+/// Static sentinel for the default mode — used for pointer comparison to detect ownership.
+pub const DEFAULT_MODE: []const u8 = "default";
+
 fn executeMode(ctx: *EventContext, cmd: command_mod.Command) void {
     const mode_name = cmd.args[0] orelse return;
     // Dupe the mode string so it outlives the command's backing memory.
-    // Free the previous mode if it was allocator-owned (not the static "default").
     const duped = ctx.allocator.dupe(u8, mode_name) catch return;
-    if (!std.mem.eql(u8, ctx.current_mode, "default")) {
+    // Free previous mode if allocator-owned (pointer != static sentinel)
+    if (ctx.current_mode.ptr != DEFAULT_MODE.ptr) {
         ctx.allocator.free(ctx.current_mode);
     }
     ctx.current_mode = duped;

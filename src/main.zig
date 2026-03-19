@@ -505,7 +505,7 @@ pub fn main() !void {
         .tree_root = tree_root,
         .allocator = allocator,
         .running = &running,
-        .current_mode = "default",
+        .current_mode = event.DEFAULT_MODE,
         .focus_follows_mouse = if (config) |cfg| cfg.focus_follows_mouse else true,
         .config = if (config) |*cfg| cfg else null,
         .key_symbols = key_symbols,
