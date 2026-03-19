@@ -1,0 +1,7 @@
+.{
+    .name = .ziawm,
+    .version = "0.1.0",
+    .fingerprint = 0x2906e439d44f6c64,
+    .minimum_zig_version = "0.15.0",
+    .paths = .{ "build.zig", "build.zig.zon", "src", "ziawm-msg", "ziawm-bar", "tests", "config" },
+}
