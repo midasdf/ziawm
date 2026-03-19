@@ -60,6 +60,30 @@ fn findContainerByWindow(root: *tree.Container, window: xcb.Window) ?*tree.Conta
     return null;
 }
 
+/// Find the deepest focused container (leaf) in a subtree.
+fn findFocusedLeaf(root: *tree.Container) ?*tree.Container {
+    // Walk down following is_focused children
+    var cur = root;
+    while (true) {
+        // If this is a window or has no children, it's the leaf
+        if (cur.type == .window or cur.children.first == null) return cur;
+        // Find focused child, or fall back to first child
+        var found_focused = false;
+        var it = cur.children.first;
+        while (it) |child| : (it = child.next) {
+            if (child.is_focused) {
+                cur = child;
+                found_focused = true;
+                break;
+            }
+        }
+        if (!found_focused) {
+            // No focused child — use first child
+            cur = cur.children.first orelse return cur;
+        }
+    }
+}
+
 /// Find the focused workspace by walking down from root.
 fn getFocusedWorkspace(root: *tree.Container) ?*tree.Container {
     // Walk: root -> output (focused) -> workspace (focused)
@@ -520,11 +544,26 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
         }
     }
 
-    // Attach to workspace
+    // Attach to the focused container's parent (or the focused split_con itself)
+    // This ensures new windows open inside the currently focused split container
     if (target_ws) |ws| {
-        ws.appendChild(con);
+        // Find where to insert: if focused container is a split_con, insert into it.
+        // If focused container is a window, insert as sibling (into its parent).
+        const focused = findFocusedLeaf(ws);
+        if (focused) |f| {
+            if (f.parent) |p| {
+                if (p.type == .split_con or p.type == .workspace) {
+                    p.appendChild(con);
+                } else {
+                    ws.appendChild(con);
+                }
+            } else {
+                ws.appendChild(con);
+            }
+        } else {
+            ws.appendChild(con);
+        }
     } else {
-        // Fallback: attach to root (shouldn't happen with proper setup)
         ctx.tree_root.appendChild(con);
     }
 

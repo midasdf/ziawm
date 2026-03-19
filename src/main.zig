@@ -192,16 +192,15 @@ fn buildOutputsJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
 /// Uses a dynamic ArrayList(u8) since tree JSON can exceed 8KB for large trees.
 /// Note: returns a slice backed by a static buffer that is reused on each call.
 /// The caller must consume the result before the next call to buildTreeJson.
+/// Module-level buffer for GET_TREE JSON responses. Retained across calls.
+var tree_json_buf: std.ArrayListUnmanaged(u8) = .empty;
+
 fn buildTreeJson(ctx: *event.EventContext, _: *[8192]u8) []const u8 {
-    // Use a static buffer with retained capacity to avoid repeated allocation.
-    // This is safe because IPC message handling is single-threaded and non-reentrant.
-    const S = struct {
-        var tree_buf: std.ArrayListUnmanaged(u8) = .empty;
-    };
-    S.tree_buf.clearRetainingCapacity();
-    writeContainerJson(S.tree_buf.writer(ctx.allocator), ctx.tree_root) catch return "{}";
-    return S.tree_buf.items;
+    tree_json_buf.clearRetainingCapacity();
+    writeContainerJson(tree_json_buf.writer(ctx.allocator), ctx.tree_root) catch return "{}";
+    return tree_json_buf.items;
 }
+
 
 fn writeContainerJson(w: anytype, con: *tree.Container) !void {
     try w.writeAll("{");
@@ -745,6 +744,9 @@ pub fn main() !void {
 
     // Remove socket file
     std.posix.unlinkat(std.posix.AT.FDCWD, sock_path, 0) catch {};
+
+    // Free static buffers
+    tree_json_buf.deinit(allocator);
 
     std.debug.print("ziawm shutting down\n", .{});
 }
