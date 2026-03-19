@@ -137,6 +137,20 @@ pub fn build(b: *std.Build) void {
     const run_layout_tests = b.addRunArtifact(layout_tests);
     test_step.dependOn(&run_layout_tests.step);
 
+    // ipc tests
+    const ipc_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_ipc.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ipc", .module = ipc_mod },
+            },
+        }),
+    });
+    const run_ipc_tests = b.addRunArtifact(ipc_tests);
+    test_step.dependOn(&run_ipc_tests.step);
+
     // Run steps
     const run_ziawm = b.addRunArtifact(ziawm_exe);
     run_ziawm.step.dependOn(b.getInstallStep());
