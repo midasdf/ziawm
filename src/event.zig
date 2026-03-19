@@ -202,25 +202,46 @@ fn relayoutAndRender(ctx: *EventContext) void {
     const gap_outer: u32 = if (cfg) |c| c.gap_outer else 0;
     const border: u32 = if (cfg) |c| c.border_px else 1;
 
+    // Reserve space for bar (20px default bar height)
+    var bar_height: u32 = 0;
+    var bar_top: bool = true;
+    if (cfg) |c_cfg| {
+        if (c_cfg.bar.status_command.len > 0) {
+            bar_height = 20;
+            bar_top = !std.mem.eql(u8, c_cfg.bar.position, "bottom");
+        }
+    }
+
     var cur = ctx.tree_root.children.first;
     while (cur) |output_con| : (cur = output_con.next) {
         if (output_con.type != .output) continue;
         var ws_cur = output_con.children.first;
         while (ws_cur) |ws| : (ws_cur = ws.next) {
             if (ws.type == .workspace) {
-                // Apply outer gaps by shrinking the workspace rect
+                // Start from output rect, apply bar reservation + outer gaps
+                var r = output_con.rect;
+
+                // Reserve bar space
+                if (bar_height > 0) {
+                    if (bar_top) {
+                        r.y += @intCast(bar_height);
+                        r.h = if (r.h > bar_height) r.h - bar_height else 0;
+                    } else {
+                        r.h = if (r.h > bar_height) r.h - bar_height else 0;
+                    }
+                }
+
+                // Apply outer gaps
                 if (gap_outer > 0) {
                     const og: i32 = @intCast(gap_outer);
                     const og2: u32 = gap_outer * 2;
-                    ws.rect = .{
-                        .x = output_con.rect.x + og,
-                        .y = output_con.rect.y + og,
-                        .w = if (output_con.rect.w > og2) output_con.rect.w - og2 else 0,
-                        .h = if (output_con.rect.h > og2) output_con.rect.h - og2 else 0,
-                    };
-                } else {
-                    ws.rect = output_con.rect;
+                    r.x += og;
+                    r.y += og;
+                    r.w = if (r.w > og2) r.w - og2 else 0;
+                    r.h = if (r.h > og2) r.h - og2 else 0;
                 }
+
+                ws.rect = r;
                 layout.apply(ws, gap, border);
             }
         }
@@ -1108,7 +1129,6 @@ fn executeMove(ctx: *EventContext, cmd: command_mod.Command) void {
 /// swap with sibling. If not, walk up to find a matching-orientation ancestor
 /// and reparent into the adjacent sibling there.
 fn moveInDirection(ctx: *EventContext, focused: *tree.Container, orientation: tree.Layout, dir: Direction) void {
-    _ = ctx;
     var con: *tree.Container = focused;
     while (con.parent) |parent| {
         if (parent.type == .root or parent.type == .output) break;
@@ -1118,28 +1138,75 @@ fn moveInDirection(ctx: *EventContext, focused: *tree.Container, orientation: tr
                 .next => con.next,
             };
             if (sibling) |sib| {
-                // Swap positions: remove focused and insert at sibling's position
-                parent.children.remove(focused);
-                switch (dir) {
-                    .prev => {
-                        parent.children.insertBefore(focused, sib);
-                        focused.parent = parent;
-                    },
-                    .next => {
-                        if (sib.next) |after| {
-                            parent.children.insertBefore(focused, after);
-                            focused.parent = parent;
-                        } else {
-                            parent.children.append(focused);
-                            focused.parent = parent;
-                        }
-                    },
+                if (con == focused) {
+                    // Simple case: focused is a direct child of the matching parent
+                    // Just swap positions within the same parent
+                    focused.unlink();
+                    switch (dir) {
+                        .prev => {
+                            parent.insertBefore(focused, sib);
+                        },
+                        .next => {
+                            if (sib.next) |after| {
+                                parent.insertBefore(focused, after);
+                            } else {
+                                parent.appendChild(focused);
+                            }
+                        },
+                    }
+                } else {
+                    // Complex case: focused is nested deeper. Remove from current
+                    // parent and reparent into the ancestor's child list.
+                    const old_parent = focused.parent;
+                    focused.unlink();
+                    switch (dir) {
+                        .prev => {
+                            parent.insertBefore(focused, sib);
+                        },
+                        .next => {
+                            if (sib.next) |after| {
+                                parent.insertBefore(focused, after);
+                            } else {
+                                parent.appendChild(focused);
+                            }
+                        },
+                    }
+                    // Clean up empty split containers left behind
+                    cleanupEmptySplitCon(old_parent, ctx.allocator);
                 }
                 return;
             }
             // No sibling at this level — keep walking up
         }
         con = parent;
+    }
+}
+
+/// Remove empty split_con containers from the tree.
+/// If a split_con has 0 children, destroy it. If it has 1 child, unwrap it
+/// (promote the child to the split_con's position).
+fn cleanupEmptySplitCon(maybe_con: ?*tree.Container, allocator: std.mem.Allocator) void {
+    var con = maybe_con orelse return;
+    while (con.type == .split_con) {
+        const par = con.parent orelse break;
+        const count = con.children.len();
+        if (count == 0) {
+            con.unlink();
+            con.destroy(allocator);
+            break;
+        } else if (count == 1) {
+            // Single child: unwrap (promote child to this position)
+            const child = con.children.first orelse break;
+            child.unlink();
+            child.percent = con.percent;
+            par.insertBefore(child, con);
+            con.unlink();
+            con.destroy(allocator);
+            // Continue checking the parent in case it's also now single-child
+            con = par;
+        } else {
+            break;
+        }
     }
 }
 

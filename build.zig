@@ -58,6 +58,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     bar_exe.linkSystemLibrary("xcb");
+    bar_exe.linkSystemLibrary("X11");
+    bar_exe.linkSystemLibrary("X11-xcb");
     bar_exe.linkSystemLibrary("xft");
     bar_exe.linkSystemLibrary("fontconfig");
     bar_exe.linkLibC();
