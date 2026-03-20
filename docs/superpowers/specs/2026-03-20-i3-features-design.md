@@ -33,7 +33,7 @@ In `handleKeyPress` (event.zig), after a keybind matches but before executing th
 | `MOD_MASK_CONTROL` | `"ctrl"` |
 | `MOD_MASK_1` | `"Mod1"` |
 
-**Implementation:** ~20 lines in `handleKeyPress`. Build JSON in a stack buffer using `fixedBufferStream`, then call `broadcastIpcEvent(ctx, .binding, payload)`. This fires for all matching bindings including mode-specific bindings (resize mode, etc.) since `handleKeyPress` already filters by `ctx.current_mode`.
+**Implementation:** ~20 lines in `handleKeyPress`. Build JSON in a stack buffer using `fixedBufferStream`, then call `broadcastIpcEvent(ctx, .binding, payload)`.
 
 **Files changed:**
 
@@ -65,21 +65,15 @@ Add `sticky` to `CommandType` enum. Parse `sticky enable`, `sticky disable`, `st
 
 In `executeWorkspace`, after determining the target workspace, before clearing focus on the old workspace:
 
-1. Walk old workspace's children (collect sticky windows first to avoid mutation during walk)
+1. Walk old workspace's children
 2. For each child where `is_floating && is_sticky`:
    - `unlink()` from old workspace
    - `appendChild()` to new workspace
 3. Proceed with normal workspace switch
 
-This migration must happen in **both** code paths within `executeWorkspace`:
-- The normal workspace switch path
-- The `back_and_forth` path (which returns early — sticky migration must run before the early return)
+This "follow the focus" approach is simpler than i3's virtual presence on all workspaces, with identical user-visible behavior.
 
-This "follow the focus" approach is simpler than i3's virtual presence on all workspaces, with identical user-visible behavior. Sticky windows always follow the focused workspace, including round-trips (A→B→A) and cross-output switches.
-
-**Multi-output coordinate adjustment:** When a sticky window follows focus to a workspace on a different output, its floating position (x, y) may be off-screen. After moving, clamp the window's `rect.x` and `rect.y` to the target workspace's output bounds.
-
-**Rendering:** No changes needed beyond coordinate adjustment. Sticky windows are physically moved to the active workspace, so they render through the normal floating path.
+**Rendering:** No changes needed. Sticky windows are physically moved to the active workspace, so they render through the normal floating path.
 
 **Files changed:**
 
@@ -109,7 +103,7 @@ const StatusBlock = struct {
     name_len: u8 = 0,
     instance: [64]u8 = undefined,
     instance_len: u8 = 0,
-    full_text: [256]u8 = undefined,
+    full_text: [128]u8 = undefined,
     full_text_len: u8 = 0,
     render_x: u16 = 0,
     render_width: u16 = 0,
@@ -118,21 +112,13 @@ const StatusBlock = struct {
 const MAX_STATUS_BLOCKS = 32;
 ```
 
-#### Protocol Detection
-
-The i3bar JSON protocol is detected from the status_command's first output line. If it contains `"click_events":true`, click event dispatch is enabled. Otherwise (plain text mode), clicks in the status area are silently ignored and no stdin pipe is used.
-
-A module-level `click_events_enabled: bool = false` flag tracks this state.
-
 #### Spawn Changes
 
 `spawnStatusCommand` creates two pipes:
 - stdout pipe (existing): bar reads status updates
 - stdin pipe (new): bar writes click events
 
-Parent holds `stdin_write_fd`. The stdin pipe is always created, but click events are only written when `click_events_enabled` is true (detected from stdout header).
-
-When `click_events_enabled` is detected, write the i3bar click protocol header to stdin:
+Parent holds `stdin_write_fd`. After spawn, write the i3bar click protocol header to stdin:
 
 ```text
 [
@@ -142,13 +128,11 @@ Subsequent click events are comma-prefixed JSON lines.
 
 #### Status Parsing
 
-Rewrite `readStatusLine` to parse i3bar JSON arrays into `StatusBlock` array:
+Extend `readStatusLine` to parse i3bar JSON arrays into `StatusBlock` array:
 
-- Detect protocol header: first non-empty line containing `{"version":1` sets JSON mode
-- JSON mode input: `[{"full_text":"CPU 45%","name":"cpu"},{"full_text":"MEM 2.1G","name":"mem"}]`
-  - Extract per-block: `full_text`, `name`, `instance`
-  - Set `click_events_enabled = true` if `"click_events":true` was in the header
-- Plain text input: single block with `name=""`, `instance=""`, `click_events_enabled` stays false
+- Input: `[{"full_text":"CPU 45%","name":"cpu"},{"full_text":"MEM 2.1G","name":"mem"}]`
+- Extract per-block: `full_text`, `name`, `instance`
+- Plain text input: single block with `name=""`, `instance=""`
 
 #### Rendering
 
@@ -159,7 +143,7 @@ Rewrite `readStatusLine` to parse i3bar JSON arrays into `StatusBlock` array:
 
 #### Click Event Dispatch
 
-When a click lands in the status area (x > last workspace button) and `click_events_enabled` is true:
+When a click lands in the status area (x > last workspace button):
 1. Walk `status_blocks`, find block where `render_x <= click_x < render_x + render_width`
 2. Build click event JSON:
 
