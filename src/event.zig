@@ -662,19 +662,49 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
         should_float = shouldFloatByType(ctx.conn, window, ctx.atoms);
     }
 
+    // Create frame window
+    const frame_id = xcb.generateId(ctx.conn);
+    const border_w: u16 = if (ctx.config) |cfg| @intCast(cfg.border_px) else 2;
+    {
+        const frame_values = [_]u32{
+            xcb.c.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
+                xcb.c.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
+                xcb.c.XCB_EVENT_MASK_EXPOSURE |
+                xcb.c.XCB_EVENT_MASK_ENTER_WINDOW,
+        };
+        _ = xcb.c.xcb_create_window(
+            ctx.conn,
+            xcb.c.XCB_COPY_FROM_PARENT,
+            frame_id,
+            ctx.root_window,
+            0, 0, 1, 1,
+            border_w,
+            xcb.c.XCB_WINDOW_CLASS_INPUT_OUTPUT,
+            xcb.c.XCB_COPY_FROM_PARENT,
+            xcb.c.XCB_CW_EVENT_MASK,
+            &frame_values,
+        );
+    }
+
+    // Reparent client window into frame
+    _ = xcb.c.xcb_reparent_window(ctx.conn, window, frame_id, 0, 0);
+
     con.window = tree.WindowData{
         .id = window,
+        .frame_id = frame_id,
         .class = wm_class.class,
         .instance = wm_class.instance,
         .title = title,
         .window_type = win_type,
         .window_role = win_role,
         .transient_for = transient,
+        .pending_unmap = 1, // absorb synthetic UnmapNotify from reparent
     };
     con.is_floating = should_float;
 
-    // Register in window lookup map
+    // Register both client and frame in window lookup map
     registerWindow(ctx, window, con);
+    registerWindow(ctx, frame_id, con);
 
     // Determine target workspace
     var target_ws = getFocusedWorkspace(ctx.tree_root);
@@ -749,7 +779,8 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
         xcb.MOD_MASK_ANY,
     );
 
-    // Map the window
+    // Map the frame and client window
+    _ = xcb.mapWindow(ctx.conn, frame_id);
     _ = xcb.mapWindow(ctx.conn, window);
 
     // Check for_window rules from config
@@ -778,15 +809,10 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
 }
 
 fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
-    // Only process SubstructureNotify events (from root window).
-    // Skip StructureNotify events (from the window itself) to avoid double-processing.
-    // When ev.event == ev.window, it's StructureNotify on the window itself.
     if (ev.event == ev.window) return;
 
-    const con = findContainerByWindow(ctx,ev.window) orelse return;
+    const con = findContainerByWindow(ctx, ev.window) orelse return;
 
-    // Check if this unmap was WM-initiated (e.g. hiding windows in tabbed/stacked mode
-    // or switching workspaces). If so, decrement counter and ignore.
     if (con.window) |*wd| {
         if (wd.pending_unmap > 0) {
             wd.pending_unmap -= 1;
@@ -794,10 +820,14 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
         }
     }
 
-    // Client-initiated unmap — remove the window from the tree
-    // If this was focused, move focus to sibling or parent
+    // Client-initiated unmap — reparent client back to root, destroy frame
+    if (con.window) |wd| {
+        _ = xcb.c.xcb_reparent_window(ctx.conn, wd.id, ctx.root_window, @intCast(con.rect.x), @intCast(con.rect.y));
+        _ = xcb.c.xcb_destroy_window(ctx.conn, wd.frame_id);
+        unregisterWindow(ctx, wd.frame_id);
+    }
+
     if (con.is_focused) {
-        // Try next sibling, then prev sibling, then parent
         const new_focus = con.next orelse con.prev orelse con.parent;
         if (new_focus) |nf| {
             if (nf != ctx.tree_root) {
@@ -806,7 +836,6 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
         }
     }
 
-    // Unregister from window lookup and destroy
     unregisterWindow(ctx, ev.window);
     con.unlink();
     con.destroy(ctx.allocator);
@@ -817,10 +846,17 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
 }
 
 fn handleDestroyNotify(ctx: *EventContext, ev: *xcb.DestroyNotifyEvent) void {
-    // Only process SubstructureNotify events (from root window).
     if (ev.event == ev.window) return;
 
-    const con = findContainerByWindow(ctx,ev.window) orelse return;
+    const con = findContainerByWindow(ctx, ev.window) orelse return;
+
+    // Destroy frame window and unregister frame_id
+    if (con.window) |wd| {
+        if (wd.frame_id != 0) {
+            _ = xcb.c.xcb_destroy_window(ctx.conn, wd.frame_id);
+            unregisterWindow(ctx, wd.frame_id);
+        }
+    }
 
     if (con.is_focused) {
         const new_focus = con.next orelse con.prev orelse con.parent;
