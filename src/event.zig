@@ -919,6 +919,41 @@ fn handleKeyPress(ctx: *EventContext, ev: *xcb.KeyPressEvent) void {
             std.mem.eql(u8, kb.mode, ctx.current_mode) and
             std.ascii.eqlIgnoreCase(kb.key, name))
         {
+            // Broadcast binding event before executing the command
+            {
+                var bind_buf: [512]u8 = undefined;
+                var bind_fbs = std.io.fixedBufferStream(&bind_buf);
+                const bind_w = bind_fbs.writer();
+                bind_w.writeAll("{\"change\":\"run\",\"binding\":{\"command\":\"") catch {};
+                jsonEscapeWrite(bind_w, kb.command) catch {};
+                bind_w.writeAll("\",\"event_state_mask\":[") catch {};
+                var first_mod = true;
+                if (ev.state & xcb.MOD_MASK_4 != 0) {
+                    if (!first_mod) bind_w.writeAll(",") catch {};
+                    bind_w.writeAll("\"Mod4\"") catch {};
+                    first_mod = false;
+                }
+                if (ev.state & xcb.MOD_MASK_SHIFT != 0) {
+                    if (!first_mod) bind_w.writeAll(",") catch {};
+                    bind_w.writeAll("\"Shift\"") catch {};
+                    first_mod = false;
+                }
+                if (ev.state & xcb.MOD_MASK_CONTROL != 0) {
+                    if (!first_mod) bind_w.writeAll(",") catch {};
+                    bind_w.writeAll("\"Control\"") catch {};
+                    first_mod = false;
+                }
+                if (ev.state & xcb.MOD_MASK_1 != 0) {
+                    if (!first_mod) bind_w.writeAll(",") catch {};
+                    bind_w.writeAll("\"Mod1\"") catch {};
+                    first_mod = false;
+                }
+                bind_w.writeAll("],\"input_type\":\"keyboard\",\"symbol\":\"") catch {};
+                jsonEscapeWrite(bind_w, name) catch {};
+                bind_w.writeAll("\"}}") catch {};
+                const bind_json = bind_fbs.getWritten();
+                if (bind_json.len > 0) broadcastIpcEvent(ctx, .binding, bind_json);
+            }
             // Parse and execute command
             if (command_mod.parse(kb.command)) |cmd| {
                 executeCommand(ctx, cmd);
