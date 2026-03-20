@@ -6,7 +6,7 @@ Born out of frustration with running i3 on a [HackberryPi Zero](https://github.c
 
 ## Status
 
-**v0.2.0 — Functional.** Core tiling, multi-monitor, status bar, and all essential i3 commands work. 266+ integration tests pass with zero memory leaks.
+**v0.3.0 — Functional.** Core tiling, multi-monitor, status bar, frame windows (reparenting WM), and all essential i3 commands work. 576+ tests pass with zero memory leaks.
 
 ### Implemented
 
@@ -41,13 +41,21 @@ Born out of frustration with running i3 on a [HackberryPi Zero](https://github.c
 - Workspace-output config assignments (`workspace N output NAME`)
 - exec_always (re-executed on restart, exec only on fresh start)
 - i3bar JSON protocol support in status bar
-- Tabbed/stacked title bar text rendering
+- Tabbed/stacked title bar text rendering (drawn on frame windows, Expose-redraw)
 - Mouse resize for tiling windows (Mod4 + right-drag)
+- Frame windows: full X11 reparenting with save-set for crash recovery
+- Font detection: 4-font fallback with metrics-based tab height
+- Per-output bar (one bar window per monitor)
+- i3bar click protocol (bidirectional stdin/stdout, per-block tracking)
+- IPC binding event broadcast
+- Sticky floating windows (follow workspace switches)
+- Per-window border control (border none/pixel/normal/toggle)
+- Move workspace to output (left/right/up/down/name)
+- Urgent workspace (WM_HINTS urgency propagation, clear on focus)
 
 ### Not yet implemented
 
-- Binding modes for resize (keybind resize works, mouse resize works)
-- Full i3bar click protocol (click events back to status_command)
+- bindcode (keycode-based bindings — keysym works for all keys)
 
 ## Architecture
 
@@ -75,7 +83,7 @@ zephwm/
 │   └── main.zig          IPC client CLI (like i3-msg)
 ├── zephwm-bar/
 │   └── main.zig          Status bar (XCB + Xft)
-├── tests/                107+ unit tests
+├── tests/                110+ unit tests
 ├── config/
 │   └── default_config    Default i3-compatible config
 ├── build.zig
@@ -111,11 +119,13 @@ Binaries are in `zig-out/bin/`.
 ### Run tests
 
 ```bash
-zig build test                    # 99 unit tests
+zig build test                    # 110+ unit tests
 bash test_xephyr.sh              # 73 basic integration tests
+bash test_xephyr_newfeatures.sh  # 43 new feature tests
 bash test_xephyr_extended.sh     # 59 extended tests
 bash test_xephyr_multimon.sh     # 35 multi-monitor tests
 bash test_xephyr_resolutions.sh  # 180 multi-resolution tests
+bash test_xephyr_visual.sh       # 170 pixel verification tests (10 resolutions)
 ```
 
 ### Cross-compile for aarch64
@@ -174,7 +184,7 @@ cp /path/to/zephwm/config/default_config ~/.config/zephwm/config
 
 | Key | Action |
 |-----|--------|
-| `Mod4+Return` | Open terminal (st) |
+| `Mod4+Return` | Open terminal (configurable via `$term` variable) |
 | `Mod4+Shift+q` | Kill focused window |
 | `Mod4+h/j/k/l` | Focus left/down/up/right |
 | `Mod4+Shift+h/j/k/l` | Move window left/down/up/right |
