@@ -18,19 +18,36 @@ var font_char_width: u16 = 6;
 pub var tab_bar_height: u16 = 16;
 
 /// Draw title bars for tabbed or stacked layout containers.
-/// Draws directly on the root window using XCB core font.
+/// Draws on the visible (focused) child's frame window.
 fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
-    const root_win = cached_root_window;
-    const r = con.rect;
+    // Find the visible (focused) child — title bars are drawn on its frame
+    const visible_child = blk: {
+        var cur2 = con.children.first;
+        while (cur2) |child| : (cur2 = child.next) {
+            if (!child.is_floating and child.is_focused) break :blk child;
+        }
+        // Fallback to first tiling child
+        cur2 = con.children.first;
+        while (cur2) |child| : (cur2 = child.next) {
+            if (!child.is_floating) break :blk child;
+        }
+        break :blk @as(?*tree.Container, null);
+    };
+
+    const target_child = visible_child orelse return;
+    const frame_win = if (target_child.window) |wd_tc| wd_tc.frame_id else return;
+    if (frame_win == 0) return;
+
     const child_count = con.children.len();
     if (child_count == 0) return;
 
     const text_y_offset: i16 = @intCast(font_ascent + 2);
     const tbh: u16 = tab_bar_height;
+    const r = con.rect; // Use parent container rect for width
 
     if (con.layout == .tabbed) {
         const tab_w: u16 = @intCast(r.w / @as(u32, @intCast(child_count)));
-        var x: i16 = @intCast(r.x);
+        var x: i16 = 0; // relative to frame, not screen
         var cur = con.children.first;
         while (cur) |child| : (cur = child.next) {
             if (child.is_floating) continue;
@@ -39,8 +56,8 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_BACKGROUND, &bg_val);
             const fg_val = [_]u32{bg};
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &fg_val);
-            const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = x, .y = @intCast(r.y), .width = tab_w, .height = tbh }};
-            _ = xcb.c.xcb_poly_fill_rectangle(conn, root_win, title_gc, 1, &rect);
+            const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = x, .y = 0, .width = tab_w, .height = tbh }};
+            _ = xcb.c.xcb_poly_fill_rectangle(conn, frame_win, title_gc, 1, &rect);
 
             const title = if (child.window) |wd| wd.title else if (child.workspace) |wsd| wsd.name else "?";
             // Truncate to fit tab width (leave 8px padding)
@@ -52,20 +69,20 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
             if (text_len > 0) {
                 const text_fg = [_]u32{0xffffff};
                 _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
-                _ = xcb.c.xcb_image_text_8(conn, text_len, root_win, title_gc, x + 4, @as(i16, @intCast(r.y)) + text_y_offset, title.ptr);
+                _ = xcb.c.xcb_image_text_8(conn, text_len, frame_win, title_gc, x + 4, text_y_offset, title.ptr);
             }
             x += @intCast(tab_w);
         }
     } else if (con.layout == .stacked) {
-        var y: i16 = @intCast(r.y);
+        var y: i16 = 0; // relative to frame
         var cur = con.children.first;
         while (cur) |child| : (cur = child.next) {
             if (child.is_floating) continue;
             const bg = if (child.is_focused) @as(u32, 0x285577) else @as(u32, 0x333333);
             const bg_val = [_]u32{bg};
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &bg_val);
-            const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = @intCast(r.x), .y = y, .width = @intCast(r.w), .height = tbh }};
-            _ = xcb.c.xcb_poly_fill_rectangle(conn, root_win, title_gc, 1, &rect);
+            const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = 0, .y = y, .width = @intCast(r.w), .height = tbh }};
+            _ = xcb.c.xcb_poly_fill_rectangle(conn, frame_win, title_gc, 1, &rect);
 
             const title = if (child.window) |wd| wd.title else if (child.workspace) |wsd| wsd.name else "?";
             const max_chars: usize = if (font_char_width > 0 and r.w > 8)
@@ -76,11 +93,20 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
             if (text_len > 0) {
                 const text_fg = [_]u32{0xffffff};
                 _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
-                _ = xcb.c.xcb_image_text_8(conn, text_len, root_win, title_gc, @as(i16, @intCast(r.x)) + 4, y + text_y_offset, title.ptr);
+                _ = xcb.c.xcb_image_text_8(conn, text_len, frame_win, title_gc, 4, y + text_y_offset, title.ptr);
             }
             y += @intCast(tbh);
         }
     }
+}
+
+/// Redraw title bars for a tabbed/stacked container. Called from Expose handler.
+pub fn redrawTitleBarsForContainer(conn: *xcb.Connection, con: *tree.Container) void {
+    if (!title_gc_initialized or title_gc == 0) return;
+    if (con.layout != .tabbed and con.layout != .stacked) return;
+    if (con.children.len() <= 1) return;
+    drawTitleBars(conn, con);
+    _ = xcb.flush(conn);
 }
 
 fn ensureTitleGc(conn: *xcb.Connection, root_window: xcb.Window) void {
@@ -252,69 +278,141 @@ fn applyWindow(
     border_unfocus_color: u32,
 ) void {
     if (con.window == null) return;
-    const win_id = con.window.?.id;
+    const wd = &con.window.?;
+    const frame_id = wd.frame_id;
 
     // Fullscreen windows are handled separately by applyFullscreen
     if (con.is_fullscreen != .none) return;
 
     const r = con.window_rect;
 
-    // Configure window geometry
-    const values = [_]u32{
-        @bitCast(r.x),
-        @bitCast(r.y),
-        r.w,
-        r.h,
-    };
-    const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
-        xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
-    _ = xcb.configureWindow(conn, win_id, mask, &values);
+    // Determine title bar offset for tabbed/stacked
+    var title_offset: u16 = 0;
+    if (con.parent) |parent| {
+        if ((parent.layout == .tabbed or parent.layout == .stacked) and parent.children.len() > 1) {
+            if (parent.layout == .tabbed) {
+                title_offset = tab_bar_height;
+            } else {
+                title_offset = tab_bar_height * @as(u16, @intCast(parent.children.len()));
+            }
+        }
+    }
 
-    // Set border color based on focus
-    const color = if (con.is_focused) border_focus_color else border_unfocus_color;
-    const border_values = [_]u32{color};
-    _ = xcb.changeWindowAttributes(conn, win_id, xcb.CW_BORDER_PIXEL, &border_values);
+    // Configure frame: position and size (includes title bar area)
+    const frame_h: u32 = r.h + @as(u32, title_offset);
+    const frame_y: i32 = r.y - @as(i32, @intCast(title_offset));
+    if (frame_id != 0) {
+        const values = [_]u32{
+            @bitCast(r.x),
+            @bitCast(frame_y),
+            r.w,
+            frame_h,
+        };
+        const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+            xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
+        _ = xcb.configureWindow(conn, frame_id, mask, &values);
 
-    // Ensure the window is mapped
-    _ = xcb.mapWindow(conn, win_id);
-    con.window.?.mapped = true;
-    con.window.?.pending_unmap = 0; // Reset stale unmap counter on map
+        // Configure client inside frame
+        const client_values = [_]u32{
+            0, // x = 0 inside frame
+            @as(u32, title_offset), // y = below title bar
+            r.w,
+            r.h,
+        };
+        _ = xcb.configureWindow(conn, wd.id, mask, &client_values);
+
+        // Border color on frame
+        const color = if (con.is_focused) border_focus_color else border_unfocus_color;
+        const border_values = [_]u32{color};
+        _ = xcb.changeWindowAttributes(conn, frame_id, xcb.CW_BORDER_PIXEL, &border_values);
+
+        // Map frame
+        _ = xcb.mapWindow(conn, frame_id);
+    } else {
+        // No frame — configure client directly (fallback)
+        const values = [_]u32{
+            @bitCast(r.x),
+            @bitCast(r.y),
+            r.w,
+            r.h,
+        };
+        const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+            xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
+        _ = xcb.configureWindow(conn, wd.id, mask, &values);
+
+        const color = if (con.is_focused) border_focus_color else border_unfocus_color;
+        const border_values = [_]u32{color};
+        _ = xcb.changeWindowAttributes(conn, wd.id, xcb.CW_BORDER_PIXEL, &border_values);
+
+        _ = xcb.mapWindow(conn, wd.id);
+    }
+    wd.mapped = true;
+    wd.pending_unmap = 0;
 }
 
 /// Render a fullscreen window: fill entire output, no border, raise above all.
 fn applyFullscreen(conn: *xcb.Connection, con: *tree.Container, parent_con: *tree.Container) void {
     if (con.window == null) return;
-    const win_id = con.window.?.id;
+    const wd = &con.window.?;
+    const frame_id = wd.frame_id;
 
     // Use parent's rect (output or workspace rect) for fullscreen
     const r = parent_con.rect;
 
-    // Configure: position, size, border=0, raise to top
-    const values = [_]u32{
-        @bitCast(r.x),
-        @bitCast(r.y),
-        r.w,
-        r.h,
-        0, // border_width = 0
-        xcb.STACK_MODE_ABOVE,
-    };
-    const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
-        xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT |
-        xcb.CONFIG_WINDOW_BORDER_WIDTH | xcb.CONFIG_WINDOW_STACK_MODE;
-    _ = xcb.configureWindow(conn, win_id, mask, &values);
+    if (frame_id != 0) {
+        // Configure frame: position, size, border=0, raise to top
+        const values = [_]u32{
+            @bitCast(r.x),
+            @bitCast(r.y),
+            r.w,
+            r.h,
+            0, // border_width = 0
+            xcb.STACK_MODE_ABOVE,
+        };
+        const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+            xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT |
+            xcb.CONFIG_WINDOW_BORDER_WIDTH | xcb.CONFIG_WINDOW_STACK_MODE;
+        _ = xcb.configureWindow(conn, frame_id, mask, &values);
 
-    _ = xcb.mapWindow(conn, win_id);
-    con.window.?.mapped = true;
-    con.window.?.pending_unmap = 0; // Reset stale unmap counter on map
+        // Client fills entire frame
+        const client_values = [_]u32{ 0, 0, r.w, r.h };
+        const client_mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+            xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
+        _ = xcb.configureWindow(conn, wd.id, client_mask, &client_values);
+
+        _ = xcb.mapWindow(conn, frame_id);
+    } else {
+        // No frame — configure client directly (fallback)
+        const values = [_]u32{
+            @bitCast(r.x),
+            @bitCast(r.y),
+            r.w,
+            r.h,
+            0,
+            xcb.STACK_MODE_ABOVE,
+        };
+        const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+            xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT |
+            xcb.CONFIG_WINDOW_BORDER_WIDTH | xcb.CONFIG_WINDOW_STACK_MODE;
+        _ = xcb.configureWindow(conn, wd.id, mask, &values);
+
+        _ = xcb.mapWindow(conn, wd.id);
+    }
+    wd.mapped = true;
+    wd.pending_unmap = 0;
 }
 
 /// Map all windows in a subtree.
 fn mapSubtree(conn: *xcb.Connection, con: *tree.Container) void {
     if (con.type == .window) {
         if (con.window) |*win_data| {
-            _ = xcb.mapWindow(conn, win_data.id);
+            if (win_data.frame_id != 0) {
+                _ = xcb.mapWindow(conn, win_data.frame_id);
+            } else {
+                _ = xcb.mapWindow(conn, win_data.id);
+            }
             win_data.mapped = true;
-            win_data.pending_unmap = 0; // Reset stale unmap counter on map
+            win_data.pending_unmap = 0;
         }
         return;
     }
@@ -349,7 +447,11 @@ pub fn unmapSubtree(conn: *xcb.Connection, con: *tree.Container) void {
     if (con.type == .window) {
         if (con.window) |*win_data| {
             if (win_data.mapped) {
-                _ = xcb.unmapWindow(conn, win_data.id);
+                if (win_data.frame_id != 0) {
+                    _ = xcb.unmapWindow(conn, win_data.frame_id);
+                } else {
+                    _ = xcb.unmapWindow(conn, win_data.id);
+                }
                 win_data.pending_unmap +|= 1;
                 win_data.mapped = false;
             }

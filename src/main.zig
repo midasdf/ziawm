@@ -844,7 +844,7 @@ pub fn main() !void {
                         },
                         linux.SIG.HUP => {
                             // Restart via re-exec (same as "restart" command)
-                            event.executeRestart();
+                            event.executeRestart(&ctx);
                             // If re-exec failed, just exit
                             running = false;
                         },
@@ -871,6 +871,9 @@ pub fn main() !void {
             }
         }
     }
+
+    // Unreparent all client windows back to root (ICCCM)
+    event.unreparentAll(&ctx);
 
     // Cleanup IPC clients
     for (&ipc_client_fds) |*slot| {
