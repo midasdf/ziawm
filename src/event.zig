@@ -1242,6 +1242,12 @@ fn handlePropertyNotify(ctx: *EventContext, ev: *xcb.PropertyNotifyEvent) void {
             // No window data to store into; free the new allocation
             if (title.len > 0) ctx.allocator.free(title);
         }
+        // Redraw title bars if window is inside a tabbed/stacked container
+        if (con.parent) |parent| {
+            if (parent.layout == .tabbed or parent.layout == .stacked) {
+                render.redrawTitleBarsForContainer(ctx.conn, parent);
+            }
+        }
     }
 
     // Update urgency from WM_HINTS
@@ -2107,13 +2113,12 @@ pub fn executeRestart(ctx: *EventContext) void {
     // because the new process inherits file descriptors.
     std.debug.print("zephwm: restarting via execvp\n", .{});
 
-    // Unreparent all client windows back to root
-    unreparentAll(ctx);
-
     // Set restart flag so exec commands are skipped on re-exec
     _ = setenv("ZEPHWM_RESTART", "1", 1);
 
-    // Read /proc/self/exe to get our binary path
+    // Read /proc/self/exe to get our binary path.
+    // Must succeed before we unreparent anything — if it fails, abort cleanly
+    // so the WM continues running in a valid state.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe_path = std.fs.readLinkAbsolute("/proc/self/exe", &exe_buf) catch {
         std.debug.print("zephwm: restart failed: cannot read /proc/self/exe\n", .{});
@@ -2124,10 +2129,18 @@ pub fn executeRestart(ctx: *EventContext) void {
     exe_buf[exe_path.len] = 0;
     const exe_z: [*:0]const u8 = @ptrCast(exe_buf[0..exe_path.len :0]);
 
+    // Unreparent all client windows back to root right before exec.
+    // We do this only after the exe path is confirmed valid so the WM
+    // is not left in a broken state if path resolution failed above.
+    unreparentAll(ctx);
+
     const argv = [_:null]?[*:0]const u8{exe_z};
     _ = execvp(exe_z, &argv);
-    // If execvp returns, it failed
+    // If execvp returns, it failed — the WM state is now broken (windows
+    // already unreparented), so exit immediately rather than returning to
+    // a corrupted event loop.
     std.debug.print("zephwm: restart execvp failed\n", .{});
+    std.c._exit(1);
 }
 
 fn executeMode(ctx: *EventContext, cmd: command_mod.Command) void {

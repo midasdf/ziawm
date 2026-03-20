@@ -37,15 +37,21 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
     const frame_win = if (target_child.window) |wd_tc| wd_tc.frame_id else return;
     if (frame_win == 0) return;
 
-    const child_count = con.children.len();
-    if (child_count == 0) return;
+    var visible_count: usize = 0;
+    {
+        var c = con.children.first;
+        while (c) |ch| : (c = ch.next) {
+            if (!ch.is_floating and ch.is_fullscreen == .none) visible_count += 1;
+        }
+    }
+    if (visible_count <= 1) return;
 
     const text_y_offset: i16 = @intCast(font_ascent + 2);
     const tbh: u16 = tab_bar_height;
     const r = con.rect; // Use parent container rect for width
 
     if (con.layout == .tabbed) {
-        const tab_w: u16 = @intCast(r.w / @as(u32, @intCast(child_count)));
+        const tab_w: u16 = @intCast(r.w / @as(u32, @intCast(visible_count)));
         var x: i16 = 0; // relative to frame, not screen
         var cur = con.children.first;
         while (cur) |child| : (cur = child.next) {
