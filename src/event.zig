@@ -139,6 +139,7 @@ fn handleRandrScreenChange(ctx: *EventContext) void {
         std.debug.print("zephwm: failed to update outputs: {}\n", .{err});
         return;
     };
+    broadcastIpcEvent(ctx, .output, "{\"change\":\"unspecified\"}");
     relayoutAndRender(ctx);
     updateAllEwmh(ctx);
 }
