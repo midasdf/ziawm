@@ -51,11 +51,19 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
     const r = con.rect; // Use parent container rect for width
 
     if (con.layout == .tabbed) {
-        const tab_w: u16 = @intCast(r.w / @as(u32, @intCast(visible_count)));
+        const base_tab_w: u16 = if (visible_count > 0) @intCast(r.w / @as(u32, @intCast(visible_count))) else @intCast(r.w);
         var x: i16 = 0; // relative to frame, not screen
+        var tab_idx: usize = 0;
         var cur = con.children.first;
         while (cur) |child| : (cur = child.next) {
             if (child.is_floating) continue;
+            // Last visible tab extends to the frame edge to avoid gap
+            tab_idx += 1;
+            const tab_w: u16 = if (tab_idx == visible_count)
+                @intCast(@as(u32, @intCast(r.w)) -| @as(u32, @intCast(x)))
+            else
+                base_tab_w;
+
             const bg = if (child.is_focused) @as(u32, 0x285577) else @as(u32, 0x333333);
             const bg_val = [_]u32{bg};
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_BACKGROUND, &bg_val);
@@ -85,6 +93,7 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
             if (child.is_floating) continue;
             const bg = if (child.is_focused) @as(u32, 0x285577) else @as(u32, 0x333333);
             const bg_val = [_]u32{bg};
+            _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_BACKGROUND, &bg_val);
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &bg_val);
             const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = 0, .y = y, .width = @intCast(r.w), .height = tbh }};
             _ = xcb.c.xcb_poly_fill_rectangle(conn, frame_win, title_gc, 1, &rect);
@@ -321,8 +330,8 @@ fn applyWindow(
         const values = [_]u32{
             @bitCast(r.x),
             @bitCast(frame_y),
-            r.w,
-            frame_h,
+            if (r.w > 0) r.w else 1,
+            if (frame_h > 0) frame_h else 1,
             @as(u32, effective_border),
         };
         const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
@@ -330,14 +339,16 @@ fn applyWindow(
             xcb.CONFIG_WINDOW_BORDER_WIDTH;
         _ = xcb.configureWindow(conn, frame_id, mask, &values);
 
-        // Configure client inside frame
+        // Configure client inside frame (no border on client — border is on frame)
         const client_values = [_]u32{
             0, // x = 0 inside frame
             @as(u32, title_offset), // y = below title bar
-            r.w,
-            r.h,
+            if (r.w > 0) r.w else 1,
+            if (r.h > 0) r.h else 1,
         };
-        _ = xcb.configureWindow(conn, wd.id, mask, &client_values);
+        const client_mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+            xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
+        _ = xcb.configureWindow(conn, wd.id, client_mask, &client_values);
 
         // Border color on frame
         const color = if (con.is_focused) border_focus_color else border_unfocus_color;
@@ -392,7 +403,7 @@ fn applyFullscreen(conn: *xcb.Connection, con: *tree.Container, parent_con: *tre
         _ = xcb.configureWindow(conn, frame_id, mask, &values);
 
         // Client fills entire frame
-        const client_values = [_]u32{ 0, 0, r.w, r.h };
+        const client_values = [_]u32{ 0, 0, if (r.w > 0) r.w else 1, if (r.h > 0) r.h else 1 };
         const client_mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
             xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
         _ = xcb.configureWindow(conn, wd.id, client_mask, &client_values);
