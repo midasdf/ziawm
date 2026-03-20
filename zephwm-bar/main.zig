@@ -45,6 +45,19 @@ const BarWindow = struct {
     }
 };
 
+const StatusBlock = struct {
+    name: [64]u8 = undefined,
+    name_len: u8 = 0,
+    instance: [64]u8 = undefined,
+    instance_len: u8 = 0,
+    full_text: [256]u8 = undefined,
+    full_text_len: u16 = 0,
+    render_x: u16 = 0,
+    render_width: u16 = 0,
+};
+
+const MAX_STATUS_BLOCKS = 32;
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -220,9 +233,13 @@ pub fn main() !void {
     }
     defer _ = c.xcb_free_gc(conn, gc);
 
-    // Status text buffer
-    var status_text: [512]u8 = undefined;
-    var status_len: usize = 0;
+    // Status block state (i3bar protocol support)
+    var status_blocks: [MAX_STATUS_BLOCKS]StatusBlock = undefined;
+    for (&status_blocks) |*b| b.* = .{};
+    var status_block_count: usize = 0;
+    var click_events_enabled: bool = false;
+    var status_stdin_fd: std.posix.fd_t = -1;
+    var json_mode: bool = false;
 
     // Spawn status_command and read from its stdout via pipe
     var status_pipe_fd: std.posix.fd_t = -1;
@@ -242,7 +259,9 @@ pub fn main() !void {
         }
         if (status_cmd) |cmd| {
             if (cmd.len > 0) {
-                status_pipe_fd = spawnStatusCommand(cmd);
+                const spawn_result = spawnStatusCommand(cmd);
+                status_pipe_fd = spawn_result.stdout_fd;
+                status_stdin_fd = spawn_result.stdin_fd;
             }
         }
     }
@@ -287,7 +306,7 @@ pub fn main() !void {
     // Initial refresh + draw
     refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, &ws_count);
     for (bars[0..bar_count]) |*bar| {
-        drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, status_text[0..status_len], &focused_fg, &unfocused_fg, &fg_color);
+        drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, &focused_fg, &unfocused_fg, &fg_color);
     }
 
     while (running) {
@@ -312,7 +331,7 @@ pub fn main() !void {
                     // Find which bar window was exposed and redraw it
                     for (bars[0..bar_count]) |*bar| {
                         if (bar.window_id == expose_ev.window) {
-                            drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, status_text[0..status_len], &focused_fg, &unfocused_fg, &fg_color);
+                            drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, &focused_fg, &unfocused_fg, &fg_color);
                             break;
                         }
                     }
@@ -322,7 +341,7 @@ pub fn main() !void {
                     // Find which bar window was clicked
                     for (bars[0..bar_count]) |*bar| {
                         if (bar.window_id == bev.event) {
-                            handleClick(allocator, sock_path, bev.event_x, bar, &ws_names, &ws_name_lens, &ws_outputs, &ws_output_lens, ws_count, font, dpy);
+                            handleClick(allocator, sock_path, bev.event_x, bev.detail, bev.event_y, bar, &ws_names, &ws_name_lens, &ws_outputs, &ws_output_lens, ws_count, font, dpy, &status_blocks, status_block_count, click_events_enabled, status_stdin_fd);
                             break;
                         }
                     }
@@ -341,13 +360,18 @@ pub fn main() !void {
 
         // Read status command output (non-blocking)
         if (status_pipe_fd >= 0) {
-            status_len = readStatusLine(status_pipe_fd, &status_text, status_len);
+            const prev_click_enabled = click_events_enabled;
+            parseStatusUpdate(status_pipe_fd, &status_blocks, &status_block_count, &click_events_enabled, &json_mode);
+            // When click_events first enabled, send the opening bracket
+            if (click_events_enabled and !prev_click_enabled and status_stdin_fd >= 0) {
+                _ = std.posix.write(status_stdin_fd, "[\n") catch {};
+            }
         }
 
         // Refresh workspace state on timeout or after processing events
         refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, &ws_count);
         for (bars[0..bar_count]) |*bar| {
-            drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, status_text[0..status_len], &focused_fg, &unfocused_fg, &fg_color);
+            drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, &focused_fg, &unfocused_fg, &fg_color);
         }
     }
 
@@ -453,7 +477,8 @@ fn drawBar(
     ws_outputs: *[MaxWorkspaces][64]u8,
     ws_output_lens: *[MaxWorkspaces]u8,
     ws_count: usize,
-    status: []const u8,
+    status_blocks: *[MAX_STATUS_BLOCKS]StatusBlock,
+    status_block_count: usize,
     focused_fg: *c.XftColor,
     unfocused_fg: *c.XftColor,
     fg_color: *c.XftColor,
@@ -511,14 +536,32 @@ fn drawBar(
         x += btn_w;
     }
 
-    // Draw status text (right-aligned, clamped to prevent underflow)
-    if (status.len > 0) {
-        var extents: c.XGlyphInfo = undefined;
-        c.XftTextExtentsUtf8(dpy, font, status.ptr, @intCast(status.len), &extents);
-        const text_width: u16 = @intCast(extents.xOff);
-        const needed = text_width + STATUS_PAD;
-        const status_x: c_int = if (needed >= bar_width) 0 else @intCast(bar_width - needed);
-        c.XftDrawStringUtf8(draw, fg_color, font, status_x, text_y, status.ptr, @intCast(status.len));
+    // Draw status blocks (right-to-left)
+    if (status_block_count > 0) {
+        var status_x: u16 = bar_width;
+        // Iterate blocks in reverse (rightmost first)
+        var bi: usize = status_block_count;
+        while (bi > 0) {
+            bi -= 1;
+            const blk = &status_blocks[bi];
+            if (blk.full_text_len == 0) continue;
+
+            const ft = blk.full_text[0..blk.full_text_len];
+            var extents: c.XGlyphInfo = undefined;
+            c.XftTextExtentsUtf8(dpy, font, ft.ptr, @intCast(ft.len), &extents);
+            const text_w: u16 = @intCast(extents.xOff);
+            const block_w: u16 = text_w + STATUS_PAD * 2;
+
+            if (status_x < block_w) break; // no room
+            status_x -= block_w;
+
+            // Record render position for click detection
+            blk.render_x = status_x;
+            blk.render_width = block_w;
+
+            // Draw text
+            c.XftDrawStringUtf8(draw, fg_color, font, @intCast(status_x + STATUS_PAD), text_y, ft.ptr, @intCast(ft.len));
+        }
     }
 
     _ = c.XSync(dpy, 0);
@@ -529,6 +572,8 @@ fn handleClick(
     allocator: std.mem.Allocator,
     sock_path: []const u8,
     click_x: i16,
+    button: u8,
+    click_y: i16,
     bar: *const BarWindow,
     ws_names: *[MaxWorkspaces][32]u8,
     ws_name_lens: *[MaxWorkspaces]u8,
@@ -537,6 +582,10 @@ fn handleClick(
     ws_count: usize,
     font: *c.XftFont,
     dpy: *c.Display,
+    status_blocks: *[MAX_STATUS_BLOCKS]StatusBlock,
+    status_block_count: usize,
+    click_events_enabled: bool,
+    status_stdin_fd: std.posix.fd_t,
 ) void {
     const bar_output = bar.getOutputName();
     // Determine which workspace button was clicked (only for this output's workspaces)
@@ -568,6 +617,34 @@ fn handleClick(
             return;
         }
         x += btn_w;
+    }
+
+    // Check status blocks for clicks (if click protocol enabled)
+    if (click_events_enabled and status_stdin_fd >= 0) {
+        for (status_blocks[0..status_block_count]) |*blk| {
+            if (blk.render_width == 0) continue;
+            const bx = @as(i16, @intCast(blk.render_x));
+            const bw = @as(i16, @intCast(blk.render_width));
+            if (click_x >= bx and click_x < bx + bw) {
+                // Send click event to status_command stdin
+                var click_buf: [512]u8 = undefined;
+                var click_fbs = std.io.fixedBufferStream(&click_buf);
+                const cw = click_fbs.writer();
+                cw.writeAll(",{\"name\":\"") catch {};
+                cw.writeAll(blk.name[0..blk.name_len]) catch {};
+                cw.writeAll("\",\"instance\":\"") catch {};
+                cw.writeAll(blk.instance[0..blk.instance_len]) catch {};
+                cw.print("\",\"button\":{d}", .{button}) catch {};
+                cw.print(",\"x\":{d},\"y\":{d}", .{ click_x, click_y }) catch {};
+                cw.print(",\"relative_x\":{d},\"relative_y\":{d}", .{
+                    click_x - bx, click_y,
+                }) catch {};
+                cw.print(",\"width\":{d},\"height\":{d}", .{ blk.render_width, BAR_HEIGHT }) catch {};
+                cw.writeAll("}\n") catch {};
+                _ = std.posix.write(status_stdin_fd, click_fbs.getWritten()) catch {};
+                break;
+            }
+        }
     }
 }
 
@@ -649,12 +726,16 @@ fn internAtom(conn: *c.xcb_connection_t, name: [*:0]const u8) u32 {
     return reply.*.atom;
 }
 
-/// Spawn status_command via fork+pipe, returning the read end of the pipe.
-fn spawnStatusCommand(cmd: []const u8) std.posix.fd_t {
-    // Create pipe
-    const pipe_fds = std.posix.pipe() catch return -1;
-    const read_fd = pipe_fds[0];
-    const write_fd = pipe_fds[1];
+/// Spawn status_command via fork+pipe, returning both stdout (read) and stdin (write) fds.
+fn spawnStatusCommand(cmd: []const u8) struct { stdout_fd: std.posix.fd_t, stdin_fd: std.posix.fd_t } {
+    // stdout pipe (bar reads)
+    const stdout_pipe = std.posix.pipe() catch return .{ .stdout_fd = -1, .stdin_fd = -1 };
+    // stdin pipe (bar writes)
+    const stdin_pipe = std.posix.pipe() catch {
+        std.posix.close(stdout_pipe[0]);
+        std.posix.close(stdout_pipe[1]);
+        return .{ .stdout_fd = -1, .stdin_fd = -1 };
+    };
 
     var cmd_buf: [512]u8 = undefined;
     const cmd_len = @min(cmd.len, cmd_buf.len - 1);
@@ -663,78 +744,135 @@ fn spawnStatusCommand(cmd: []const u8) std.posix.fd_t {
     const cmd_z: [*:0]const u8 = @ptrCast(cmd_buf[0..cmd_len :0]);
 
     const pid = std.posix.fork() catch {
-        std.posix.close(read_fd);
-        std.posix.close(write_fd);
-        return -1;
+        std.posix.close(stdout_pipe[0]);
+        std.posix.close(stdout_pipe[1]);
+        std.posix.close(stdin_pipe[0]);
+        std.posix.close(stdin_pipe[1]);
+        return .{ .stdout_fd = -1, .stdin_fd = -1 };
     };
 
     if (pid == 0) {
-        // Child: redirect stdout to pipe write end
-        std.posix.close(read_fd);
-        _ = std.c.dup2(write_fd, 1); // stdout = pipe write end
-        std.posix.close(write_fd);
+        // Child
+        std.posix.close(stdout_pipe[0]); // close read end of stdout
+        std.posix.close(stdin_pipe[1]); // close write end of stdin
+        _ = std.c.dup2(stdout_pipe[1], 1); // stdout = pipe
+        _ = std.c.dup2(stdin_pipe[0], 0); // stdin = pipe
+        std.posix.close(stdout_pipe[1]);
+        std.posix.close(stdin_pipe[0]);
 
         const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z };
         _ = execvp("/bin/sh", &argv);
         std.c._exit(1);
     }
 
-    // Parent: close write end, return read end
-    std.posix.close(write_fd);
+    // Parent
+    std.posix.close(stdout_pipe[1]); // close write end of stdout
+    std.posix.close(stdin_pipe[0]); // close read end of stdin
 
-    // Set non-blocking
-    const flags = std.posix.fcntl(read_fd, std.posix.F.GETFL, 0) catch return read_fd;
-    _ = std.posix.fcntl(read_fd, std.posix.F.SETFL, flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true }))) catch {};
+    // Set stdout read to non-blocking
+    const flags = std.posix.fcntl(stdout_pipe[0], std.posix.F.GETFL, 0) catch return .{ .stdout_fd = stdout_pipe[0], .stdin_fd = stdin_pipe[1] };
+    _ = std.posix.fcntl(stdout_pipe[0], std.posix.F.SETFL, flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true }))) catch {};
 
     std.debug.print("zephwm-bar: spawned status_command (pid {d})\n", .{pid});
-    return read_fd;
+    return .{ .stdout_fd = stdout_pipe[0], .stdin_fd = stdin_pipe[1] };
 }
 
-/// Read available data from status pipe. Extracts the last complete line
-/// as the status text. Handles both plain text and i3bar JSON protocol.
-/// Returns the new status_len.
-fn readStatusLine(fd: std.posix.fd_t, status_buf: *[512]u8, current_len: usize) usize {
-    var read_buf: [1024]u8 = undefined;
-    const n = std.posix.read(fd, &read_buf) catch return current_len;
-    if (n == 0) return current_len;
+/// Parse status command output into StatusBlock array.
+/// Supports both plain text and i3bar JSON protocol.
+fn parseStatusUpdate(
+    fd: std.posix.fd_t,
+    blocks: *[MAX_STATUS_BLOCKS]StatusBlock,
+    block_count: *usize,
+    click_enabled: *bool,
+    json_mode: *bool,
+) void {
+    var read_buf: [4096]u8 = undefined;
+    const n = std.posix.read(fd, &read_buf) catch return;
+    if (n == 0) return;
+    const data = read_buf[0..n];
 
     // Find the last complete line
-    const data = read_buf[0..n];
-    var last_line_start: usize = 0;
-    var last_line_end: usize = 0;
-    var i: usize = 0;
-    while (i < data.len) : (i += 1) {
-        if (data[i] == '\n' and i > last_line_start) {
-            last_line_start = last_line_end; // previous start becomes fallback
-            last_line_end = i;
+    var last_line: []const u8 = "";
+    var line_start: usize = 0;
+    for (data, 0..) |ch, i| {
+        if (ch == '\n') {
+            if (i > line_start) {
+                last_line = data[line_start..i];
+            }
+            line_start = i + 1;
         }
     }
+    if (last_line.len == 0) return;
 
-    // Use the last complete line
-    var line = data[last_line_start..last_line_end];
-    // Trim whitespace and leading comma (i3bar protocol: lines start with ,)
-    while (line.len > 0 and (line[0] == ',' or line[0] == '[' or line[0] == ' ' or line[0] == '\n')) {
+    // Trim leading whitespace/protocol markers
+    var line = last_line;
+    while (line.len > 0 and (line[0] == ',' or line[0] == ' ' or line[0] == '\t')) {
         line = line[1..];
     }
-    while (line.len > 0 and (line[line.len - 1] == ']' or line[line.len - 1] == '\n' or line[line.len - 1] == ' ')) {
-        line = line[0 .. line.len - 1];
-    }
 
-    if (line.len == 0) return current_len;
-
-    // Try to extract "full_text":"..." from i3bar JSON
-    if (std.mem.indexOf(u8, line, "\"full_text\":\"")) |pos| {
-        const start = pos + 13;
-        if (std.mem.indexOfScalar(u8, line[start..], '"')) |end| {
-            const text = line[start .. start + end];
-            const copy_len = @min(text.len, 512);
-            @memcpy(status_buf[0..copy_len], text[0..copy_len]);
-            return copy_len;
+    // Detect protocol header
+    if (!json_mode.* and std.mem.indexOf(u8, line, "{\"version\":") != null) {
+        json_mode.* = true;
+        if (std.mem.indexOf(u8, line, "\"click_events\":true") != null) {
+            click_enabled.* = true;
         }
+        return; // Header line, no blocks to display yet
     }
 
-    // Plain text: use the whole line
-    const copy_len = @min(line.len, 512);
-    @memcpy(status_buf[0..copy_len], line[0..copy_len]);
-    return copy_len;
+    // JSON mode: parse block array
+    if (json_mode.* and line.len > 0 and (line[0] == '[' or line[0] == '{')) {
+        // Strip outer brackets
+        var inner = line;
+        if (inner[0] == '[') inner = inner[1..];
+        if (inner.len > 0 and inner[inner.len - 1] == ']') inner = inner[0 .. inner.len - 1];
+
+        block_count.* = 0;
+        var pos: usize = 0;
+        while (pos < inner.len and block_count.* < MAX_STATUS_BLOCKS) {
+            // Find next block object
+            const obj_start = std.mem.indexOfScalar(u8, inner[pos..], '{') orelse break;
+            const obj_end = std.mem.indexOfScalar(u8, inner[pos + obj_start..], '}') orelse break;
+            const obj = inner[pos + obj_start .. pos + obj_start + obj_end + 1];
+
+            const idx = block_count.*;
+            blocks[idx] = .{};
+
+            // Extract full_text
+            if (extractJsonString(obj, "\"full_text\":\"")) |ft| {
+                const copy_len = @min(ft.len, @as(usize, 256));
+                @memcpy(blocks[idx].full_text[0..copy_len], ft[0..copy_len]);
+                blocks[idx].full_text_len = @intCast(copy_len);
+            }
+            // Extract name
+            if (extractJsonString(obj, "\"name\":\"")) |nm| {
+                const copy_len = @min(nm.len, @as(usize, 64));
+                @memcpy(blocks[idx].name[0..copy_len], nm[0..copy_len]);
+                blocks[idx].name_len = @intCast(copy_len);
+            }
+            // Extract instance
+            if (extractJsonString(obj, "\"instance\":\"")) |inst| {
+                const copy_len = @min(inst.len, @as(usize, 64));
+                @memcpy(blocks[idx].instance[0..copy_len], inst[0..copy_len]);
+                blocks[idx].instance_len = @intCast(copy_len);
+            }
+
+            block_count.* += 1;
+            pos = pos + obj_start + obj_end + 1;
+        }
+    } else {
+        // Plain text mode: single block
+        block_count.* = 0;
+        blocks[0] = .{};
+        const copy_len = @min(line.len, @as(usize, 256));
+        @memcpy(blocks[0].full_text[0..copy_len], line[0..copy_len]);
+        blocks[0].full_text_len = @intCast(copy_len);
+        block_count.* = 1;
+    }
+}
+
+fn extractJsonString(json: []const u8, key: []const u8) ?[]const u8 {
+    const key_pos = std.mem.indexOf(u8, json, key) orelse return null;
+    const val_start = key_pos + key.len;
+    const val_end = std.mem.indexOfScalar(u8, json[val_start..], '"') orelse return null;
+    return json[val_start .. val_start + val_end];
 }
