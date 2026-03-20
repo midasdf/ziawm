@@ -90,7 +90,7 @@ fn ensureTitleGc(conn: *xcb.Connection, root_window: xcb.Window) void {
     // Font fallback list — try each until one succeeds
     const font_names = [_]struct { name: [*]const u8, len: u16 }{
         .{ .name = "fixed", .len = 5 },
-        .{ .name = "-misc-fixed-medium-r-semicondensed--13-120-75-75-c-60-iso10646-1", .len = 65 },
+        .{ .name = "-misc-fixed-medium-r-semicondensed--13-120-75-75-c-60-iso10646-1", .len = 64 },
         .{ .name = "-misc-fixed-medium-r-normal--14-130-75-75-c-70-iso10646-1", .len = 57 },
         .{ .name = "cursor", .len = 6 },
     };
