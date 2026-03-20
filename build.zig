@@ -115,6 +115,27 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Workspace module (pure Zig, depends on tree)
+    const workspace_mod = b.createModule(.{
+        .root_source_file = b.path("src/workspace.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "tree.zig", .module = tree_mod },
+        },
+    });
+
+    // Scratchpad module (pure Zig, depends on tree + workspace)
+    const scratchpad_mod = b.createModule(.{
+        .root_source_file = b.path("src/scratchpad.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "tree.zig", .module = tree_mod },
+            .{ .name = "workspace.zig", .module = workspace_mod },
+        },
+    });
+
     // --- Test step ---
     const test_step = b.step("test", "Run tests");
 
@@ -203,6 +224,36 @@ pub fn build(b: *std.Build) void {
     });
     const run_ipc_tests = b.addRunArtifact(ipc_tests);
     test_step.dependOn(&run_ipc_tests.step);
+
+    // workspace tests
+    const workspace_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_workspace.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "tree", .module = tree_mod },
+                .{ .name = "workspace", .module = workspace_mod },
+            },
+        }),
+    });
+    const run_workspace_tests = b.addRunArtifact(workspace_tests);
+    test_step.dependOn(&run_workspace_tests.step);
+
+    // scratchpad tests
+    const scratchpad_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_scratchpad.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "tree", .module = tree_mod },
+                .{ .name = "scratchpad", .module = scratchpad_mod },
+            },
+        }),
+    });
+    const run_scratchpad_tests = b.addRunArtifact(scratchpad_tests);
+    test_step.dependOn(&run_scratchpad_tests.step);
 
     // Run steps
     const run_zephwm = b.addRunArtifact(zephwm_exe);

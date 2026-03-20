@@ -38,14 +38,16 @@ Born out of frustration with running i3 on a [HackberryPi Zero](https://github.c
 - Status bar (zephwm-bar: workspace buttons, status text, click-to-switch, Xft rendering)
 - Inner/outer gaps
 - Custom border width and colors
+- Workspace-output config assignments (`workspace N output NAME`)
+- exec_always (re-executed on restart, exec only on fresh start)
+- i3bar JSON protocol support in status bar
+- Tabbed/stacked title bar text rendering
+- Mouse resize for tiling windows (Mod4 + right-drag)
 
 ### Not yet implemented
 
-- Mouse-based tiling window resize (only floating)
-- Binding modes for resize (keybind resize works)
-- i3bar protocol for status_command JSON output
-- Multi-monitor workspace-output config assignments
-- Window decorations/title bars for tabbed/stacked
+- Binding modes for resize (keybind resize works, mouse resize works)
+- Full i3bar click protocol (click events back to status_command)
 
 ## Architecture
 
@@ -73,7 +75,7 @@ zephwm/
 │   └── main.zig          IPC client CLI (like i3-msg)
 ├── zephwm-bar/
 │   └── main.zig          Status bar (XCB + Xft)
-├── tests/                99 unit tests
+├── tests/                107+ unit tests
 ├── config/
 │   └── default_config    Default i3-compatible config
 ├── build.zig

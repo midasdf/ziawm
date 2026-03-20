@@ -695,9 +695,20 @@ pub fn main() !void {
         event.grabKeys(&ctx, cfg);
     }
 
-    // 11. Run exec commands from config
+    // 11. Run exec/exec_always commands from config
+    // exec: only on fresh start (not restart). exec_always: always.
+    const is_restart = std.posix.getenv("ZEPHWM_RESTART") != null;
     if (config) |cfg| {
-        for (cfg.exec_cmds.items) |exec_cmd| {
+        if (!is_restart) {
+            for (cfg.exec_cmds.items) |exec_cmd| {
+                const cmd_str = std.fmt.allocPrint(allocator, "exec {s}", .{exec_cmd}) catch continue;
+                defer allocator.free(cmd_str);
+                if (command_mod.parse(cmd_str)) |cmd| {
+                    event.executeCommand(&ctx, cmd);
+                }
+            }
+        }
+        for (cfg.exec_always_cmds.items) |exec_cmd| {
             const cmd_str = std.fmt.allocPrint(allocator, "exec {s}", .{exec_cmd}) catch continue;
             defer allocator.free(cmd_str);
             if (command_mod.parse(cmd_str)) |cmd| {

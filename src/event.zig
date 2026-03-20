@@ -350,7 +350,7 @@ fn relayoutAndRender(ctx: *EventContext) void {
             }
     }
 
-    render.applyTree(ctx.conn, ctx.tree_root, ctx.border_focus_color, ctx.border_unfocus_color);
+    render.applyTree(ctx.conn, ctx.tree_root, ctx.border_focus_color, ctx.border_unfocus_color, ctx.root_window);
 }
 
 // --- EWMH property update helpers ---
@@ -894,8 +894,8 @@ fn handleButtonPress(ctx: *EventContext, ev: *xcb.ButtonPressEvent) void {
     setFocus(ctx, con);
 
     // Check for floating_modifier (Mod4) + button for drag move/resize
-    if (con.is_floating and (ev.state & xcb.MOD_MASK_4 != 0)) {
-        if (ev.detail == 1 or ev.detail == 3) {
+    if (ev.state & xcb.MOD_MASK_4 != 0) {
+        if (con.is_floating and (ev.detail == 1 or ev.detail == 3)) {
             // Start drag: Button1=move, Button3=resize
             ctx.drag_window = con;
             ctx.drag_button = ev.detail;
@@ -920,6 +920,22 @@ fn handleButtonPress(ctx: *EventContext, ev: *xcb.ButtonPressEvent) void {
             );
             return;
         }
+
+        // Tiling window: Mod4 + right-click drag for resize
+        if (!con.is_floating and ev.detail == 3) {
+            ctx.drag_window = con;
+            ctx.drag_button = 3;
+            ctx.drag_start_x = ev.root_x;
+            ctx.drag_start_y = ev.root_y;
+            ctx.drag_orig_w = 0; // sentinel: tiling mode
+            _ = xcb.c.xcb_grab_pointer(
+                ctx.conn, 0, ctx.root_window,
+                xcb.c.XCB_EVENT_MASK_BUTTON_RELEASE | xcb.c.XCB_EVENT_MASK_POINTER_MOTION,
+                xcb.c.XCB_GRAB_MODE_ASYNC, xcb.c.XCB_GRAB_MODE_ASYNC,
+                xcb.c.XCB_WINDOW_NONE, xcb.c.XCB_CURSOR_NONE, xcb.c.XCB_CURRENT_TIME,
+            );
+            return;
+        }
     }
 
     // Allow the click to pass through to the application
@@ -932,21 +948,44 @@ fn handleMotionNotify(ctx: *EventContext, ev: *xcb.c.xcb_motion_notify_event_t) 
     const dx: i32 = @as(i32, ev.root_x) - @as(i32, ctx.drag_start_x);
     const dy: i32 = @as(i32, ev.root_y) - @as(i32, ctx.drag_start_y);
 
-    if (ctx.drag_button == 1) {
-        // Move
+    if (ctx.drag_button == 1 and con.is_floating) {
+        // Floating move
         con.rect.x = ctx.drag_orig_x + dx;
         con.rect.y = ctx.drag_orig_y + dy;
         con.window_rect = con.rect;
-    } else if (ctx.drag_button == 3) {
-        // Resize
+    } else if (ctx.drag_button == 3 and con.is_floating) {
+        // Floating resize
         const new_w = @as(i32, @intCast(ctx.drag_orig_w)) + dx;
         const new_h = @as(i32, @intCast(ctx.drag_orig_h)) + dy;
         con.rect.w = @intCast(@max(new_w, 50));
         con.rect.h = @intCast(@max(new_h, 50));
         con.window_rect = con.rect;
+    } else if (ctx.drag_button == 3 and !con.is_floating) {
+        // Tiling resize via percent adjustment (throttled to avoid excessive relayout)
+        const threshold: i32 = 10; // minimum pixel delta to trigger resize
+        if (dx > threshold or dx < -threshold or dy > threshold or dy < -threshold) {
+            if (@abs(dx) > @abs(dy)) {
+                // Horizontal resize
+                if (dx > 0) {
+                    executeResizeInternal(ctx, con, "grow", "width", @intCast(@abs(dx)));
+                } else {
+                    executeResizeInternal(ctx, con, "shrink", "width", @intCast(@abs(dx)));
+                }
+            } else {
+                // Vertical resize
+                if (dy > 0) {
+                    executeResizeInternal(ctx, con, "grow", "height", @intCast(@abs(dy)));
+                } else {
+                    executeResizeInternal(ctx, con, "shrink", "height", @intCast(@abs(dy)));
+                }
+            }
+            ctx.drag_start_x = ev.root_x;
+            ctx.drag_start_y = ev.root_y;
+        }
+        return;
     }
 
-    // Apply immediately for smooth dragging
+    // Apply immediately for smooth floating dragging
     if (con.window) |wd| {
         const values = [_]u32{
             @bitCast(con.rect.x),
@@ -1430,8 +1469,19 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
         }
         if (ws == null) {
             ws = workspace.create(ctx.allocator, name, num) catch return;
-            // Attach to focused output (or first output as fallback)
-            if (getFocusedOutput(ctx.tree_root)) |out| {
+            // Check config for workspace-output assignment
+            var target_out = getFocusedOutput(ctx.tree_root);
+            if (ctx.config) |cfg| {
+                for (cfg.workspace_outputs.items) |wo| {
+                    if (std.mem.eql(u8, wo.workspace, name)) {
+                        if (output.findByName(ctx.tree_root, wo.output)) |assigned_out| {
+                            target_out = assigned_out;
+                        }
+                        break;
+                    }
+                }
+            }
+            if (target_out) |out| {
                 out.appendChild(ws.?);
                 ws.?.rect = out.rect;
             }
@@ -1593,6 +1643,7 @@ fn sendDeleteWindow(ctx: *EventContext, window: xcb.Window) bool {
 
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 extern "c" fn setsid() std.c.pid_t;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
 fn executeExec(cmd: command_mod.Command) void {
     const actual_cmd = cmd.args[0] orelse return;
@@ -1771,6 +1822,47 @@ fn executeResize(ctx: *EventContext, cmd: command_mod.Command) void {
     relayoutAndRender(ctx);
 }
 
+/// Internal resize for mouse drag — takes direction/dimension as strings and amount as i32.
+fn executeResizeInternal(ctx: *EventContext, con: *tree.Container, direction: []const u8, dimension: []const u8, amount: i32) void {
+    if (amount <= 0) return;
+    const parent = con.parent orelse return;
+    const is_grow = std.mem.eql(u8, direction, "grow");
+    const is_width = std.mem.eql(u8, dimension, "width");
+    const target_layout: tree.Layout = if (is_width) .hsplit else .vsplit;
+
+    var target_parent: ?*tree.Container = null;
+    var resize_child: *tree.Container = con;
+    var cur_parent: ?*tree.Container = parent;
+    while (cur_parent) |p| {
+        if (p.type == .root or p.type == .output) break;
+        if (p.layout == target_layout and p.tilingChildCount() > 1) {
+            target_parent = p;
+            break;
+        }
+        resize_child = p;
+        cur_parent = p.parent;
+    }
+    const tp = target_parent orelse return;
+    const total: u32 = if (is_width) tp.rect.w else tp.rect.h;
+    if (total == 0) return;
+    const delta: f32 = @as(f32, @floatFromInt(amount)) / @as(f32, @floatFromInt(total));
+    const sign: f32 = if (is_grow) delta else -delta;
+    if (resize_child.percent <= 0.0) {
+        const n = tp.tilingChildCount();
+        if (n == 0) return;
+        resize_child.percent = 1.0 / @as(f32, @floatFromInt(n));
+    }
+    resize_child.percent = @max(0.05, @min(0.95, resize_child.percent + sign));
+    const sibling = resize_child.next orelse resize_child.prev orelse return;
+    if (sibling.percent <= 0.0) {
+        const n = tp.tilingChildCount();
+        if (n == 0) return;
+        sibling.percent = 1.0 / @as(f32, @floatFromInt(n));
+    }
+    sibling.percent = @max(0.05, @min(0.95, sibling.percent - sign));
+    relayoutAndRender(ctx);
+}
+
 fn executeFocusOutput(ctx: *EventContext, cmd: command_mod.Command) void {
     const arg = cmd.args[0] orelse return;
 
@@ -1829,6 +1921,9 @@ pub fn executeRestart() void {
     // Re-exec ourselves. This preserves the X connection and managed windows
     // because the new process inherits file descriptors.
     std.debug.print("zephwm: restarting via execvp\n", .{});
+
+    // Set restart flag so exec commands are skipped on re-exec
+    _ = setenv("ZEPHWM_RESTART", "1", 1);
 
     // Read /proc/self/exe to get our binary path
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;

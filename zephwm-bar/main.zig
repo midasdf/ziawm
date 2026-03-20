@@ -10,6 +10,8 @@ const c = @cImport({
     @cInclude("X11/Xft/Xft.h");
 });
 
+extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+
 const VERSION = "0.1.0";
 const BAR_HEIGHT: u16 = 20;
 const WS_BUTTON_PAD: u16 = 10; // horizontal padding per workspace button
@@ -166,7 +168,30 @@ pub fn main() !void {
 
     // Status text buffer
     var status_text: [512]u8 = undefined;
-    const status_len: usize = 0;
+    var status_len: usize = 0;
+
+    // Spawn status_command and read from its stdout via pipe
+    var status_pipe_fd: std.posix.fd_t = -1;
+    {
+        // Get status_command from bar config via IPC
+        const bar_cfg = ipc.sendRequest(allocator, sock_path, .get_bar_config, "") orelse null;
+        var status_cmd: ?[]const u8 = null;
+        if (bar_cfg) |cfg_json| {
+            defer allocator.free(cfg_json);
+            // Simple parse: find "status_command":"..."
+            if (std.mem.indexOf(u8, cfg_json, "\"status_command\":\"")) |pos| {
+                const start = pos + 18;
+                if (std.mem.indexOfScalar(u8, cfg_json[start..], '"')) |end| {
+                    status_cmd = cfg_json[start .. start + end];
+                }
+            }
+        }
+        if (status_cmd) |cmd| {
+            if (cmd.len > 0) {
+                status_pipe_fd = spawnStatusCommand(cmd);
+            }
+        }
+    }
 
     // Workspace info cache
     const MaxWorkspaces = 16;
@@ -187,6 +212,15 @@ pub fn main() !void {
         return;
     }
     defer std.posix.close(@intCast(epoll_fd));
+
+    // Add status pipe fd to epoll if available
+    if (status_pipe_fd >= 0) {
+        var pipe_event = linux.epoll_event{
+            .events = linux.EPOLL.IN,
+            .data = .{ .fd = status_pipe_fd },
+        };
+        _ = linux.epoll_ctl(@intCast(epoll_fd), linux.EPOLL.CTL_ADD, @intCast(status_pipe_fd), &pipe_event);
+    }
 
     var xcb_event = linux.epoll_event{
         .events = linux.EPOLL.IN,
@@ -234,6 +268,11 @@ pub fn main() !void {
         }
 
         if (c.xcb_connection_has_error(conn) != 0) break;
+
+        // Read status command output (non-blocking)
+        if (status_pipe_fd >= 0) {
+            status_len = readStatusLine(status_pipe_fd, &status_text, status_len);
+        }
 
         // Refresh workspace state on timeout or after processing events
         refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_count);
@@ -400,4 +439,94 @@ fn internAtom(conn: *c.xcb_connection_t, name: [*:0]const u8) u32 {
     const reply = c.xcb_intern_atom_reply(conn, cookie, null) orelse return 0;
     defer std.c.free(reply);
     return reply.*.atom;
+}
+
+/// Spawn status_command via fork+pipe, returning the read end of the pipe.
+fn spawnStatusCommand(cmd: []const u8) std.posix.fd_t {
+    // Create pipe
+    const pipe_fds = std.posix.pipe() catch return -1;
+    const read_fd = pipe_fds[0];
+    const write_fd = pipe_fds[1];
+
+    var cmd_buf: [512]u8 = undefined;
+    const cmd_len = @min(cmd.len, cmd_buf.len - 1);
+    @memcpy(cmd_buf[0..cmd_len], cmd[0..cmd_len]);
+    cmd_buf[cmd_len] = 0;
+    const cmd_z: [*:0]const u8 = @ptrCast(cmd_buf[0..cmd_len :0]);
+
+    const pid = std.posix.fork() catch {
+        std.posix.close(read_fd);
+        std.posix.close(write_fd);
+        return -1;
+    };
+
+    if (pid == 0) {
+        // Child: redirect stdout to pipe write end
+        std.posix.close(read_fd);
+        _ = std.c.dup2(write_fd, 1); // stdout = pipe write end
+        std.posix.close(write_fd);
+
+        const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z };
+        _ = execvp("/bin/sh", &argv);
+        std.c._exit(1);
+    }
+
+    // Parent: close write end, return read end
+    std.posix.close(write_fd);
+
+    // Set non-blocking
+    const flags = std.posix.fcntl(read_fd, std.posix.F.GETFL, 0) catch return read_fd;
+    _ = std.posix.fcntl(read_fd, std.posix.F.SETFL, flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true }))) catch {};
+
+    std.debug.print("zephwm-bar: spawned status_command (pid {d})\n", .{pid});
+    return read_fd;
+}
+
+/// Read available data from status pipe. Extracts the last complete line
+/// as the status text. Handles both plain text and i3bar JSON protocol.
+/// Returns the new status_len.
+fn readStatusLine(fd: std.posix.fd_t, status_buf: *[512]u8, current_len: usize) usize {
+    var read_buf: [1024]u8 = undefined;
+    const n = std.posix.read(fd, &read_buf) catch return current_len;
+    if (n == 0) return current_len;
+
+    // Find the last complete line
+    const data = read_buf[0..n];
+    var last_line_start: usize = 0;
+    var last_line_end: usize = 0;
+    var i: usize = 0;
+    while (i < data.len) : (i += 1) {
+        if (data[i] == '\n' and i > last_line_start) {
+            last_line_start = last_line_end; // previous start becomes fallback
+            last_line_end = i;
+        }
+    }
+
+    // Use the last complete line
+    var line = data[last_line_start..last_line_end];
+    // Trim whitespace and leading comma (i3bar protocol: lines start with ,)
+    while (line.len > 0 and (line[0] == ',' or line[0] == '[' or line[0] == ' ' or line[0] == '\n')) {
+        line = line[1..];
+    }
+    while (line.len > 0 and (line[line.len - 1] == ']' or line[line.len - 1] == '\n' or line[line.len - 1] == ' ')) {
+        line = line[0 .. line.len - 1];
+    }
+
+    if (line.len == 0) return current_len;
+
+    // Try to extract "full_text":"..." from i3bar JSON
+    if (std.mem.indexOf(u8, line, "\"full_text\":\"")) |pos| {
+        const start = pos + 13;
+        if (std.mem.indexOfScalar(u8, line[start..], '"')) |end| {
+            const text = line[start .. start + end];
+            const copy_len = @min(text.len, 512);
+            @memcpy(status_buf[0..copy_len], text[0..copy_len]);
+            return copy_len;
+        }
+    }
+
+    // Plain text: use the whole line
+    const copy_len = @min(line.len, 512);
+    @memcpy(status_buf[0..copy_len], line[0..copy_len]);
+    return copy_len;
 }

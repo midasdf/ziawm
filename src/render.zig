@@ -2,15 +2,100 @@
 const xcb = @import("xcb.zig");
 const tree = @import("tree.zig");
 
+/// Cached GC and font for title bar rendering. Initialized lazily.
+var title_gc: u32 = 0;
+var title_font: u32 = 0;
+var title_gc_initialized: bool = false;
+var cached_root_window: xcb.Window = 0;
+
 /// Walk the container tree and apply geometry to X11 windows.
 /// Only the focused (visible) workspace per output is rendered;
 /// windows on other workspaces are unmapped.
+/// Initialize GC and font for title bar rendering (lazy, once).
+const TAB_BAR_HEIGHT: u16 = 16;
+
+/// Draw title bars for tabbed or stacked layout containers.
+/// Draws directly on the root window using XCB core font.
+fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
+    const root_win = cached_root_window;
+    const r = con.rect;
+    const child_count = con.children.len();
+    if (child_count == 0) return;
+
+    if (con.layout == .tabbed) {
+        // Tabbed: one row of tabs, each tab is rect.w / child_count wide
+        const tab_w: u16 = @intCast(r.w / @as(u32, @intCast(child_count)));
+        var x: i16 = @intCast(r.x);
+        var cur = con.children.first;
+        while (cur) |child| : (cur = child.next) {
+            if (child.is_floating) continue;
+            // Background
+            const bg = if (child.is_focused) @as(u32, 0x285577) else @as(u32, 0x333333);
+            const bg_val = [_]u32{bg};
+            _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_BACKGROUND, &bg_val);
+            const fg_val = [_]u32{bg};
+            _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &fg_val);
+            const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = x, .y = @intCast(r.y), .width = tab_w, .height = TAB_BAR_HEIGHT }};
+            _ = xcb.c.xcb_poly_fill_rectangle(conn, root_win, title_gc, 1, &rect);
+
+            // Text
+            const title = if (child.window) |wd| wd.title else if (child.workspace) |wsd| wsd.name else "?";
+            const text_len: u8 = @intCast(@min(title.len, 255));
+            if (text_len > 0) {
+                const text_fg = [_]u32{0xffffff};
+                _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
+                _ = xcb.c.xcb_image_text_8(conn, text_len, root_win, title_gc, x + 4, @as(i16, @intCast(r.y)) + 12, title.ptr);
+            }
+            x += @intCast(tab_w);
+        }
+    } else if (con.layout == .stacked) {
+        // Stacked: one row per child, each TAB_BAR_HEIGHT tall
+        var y: i16 = @intCast(r.y);
+        var cur = con.children.first;
+        while (cur) |child| : (cur = child.next) {
+            if (child.is_floating) continue;
+            const bg = if (child.is_focused) @as(u32, 0x285577) else @as(u32, 0x333333);
+            const bg_val = [_]u32{bg};
+            _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &bg_val);
+            const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = @intCast(r.x), .y = y, .width = @intCast(r.w), .height = TAB_BAR_HEIGHT }};
+            _ = xcb.c.xcb_poly_fill_rectangle(conn, root_win, title_gc, 1, &rect);
+
+            const title = if (child.window) |wd| wd.title else if (child.workspace) |wsd| wsd.name else "?";
+            const text_len: u8 = @intCast(@min(title.len, 255));
+            if (text_len > 0) {
+                const text_fg = [_]u32{0xffffff};
+                _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
+                _ = xcb.c.xcb_image_text_8(conn, text_len, root_win, title_gc, @as(i16, @intCast(r.x)) + 4, y + 12, title.ptr);
+            }
+            y += TAB_BAR_HEIGHT;
+        }
+    }
+}
+
+fn ensureTitleGc(conn: *xcb.Connection, root_window: xcb.Window) void {
+    if (title_gc_initialized) return;
+    title_gc_initialized = true;
+
+    // Open a basic X core font
+    title_font = xcb.generateId(conn);
+    _ = xcb.c.xcb_open_font(conn, title_font, 5, "fixed");
+
+    title_gc = xcb.generateId(conn);
+    const gc_values = [_]u32{ 0xffffff, 0x285577, title_font };
+    _ = xcb.c.xcb_create_gc(conn, title_gc, root_window,
+        xcb.c.XCB_GC_FOREGROUND | xcb.c.XCB_GC_BACKGROUND | xcb.c.XCB_GC_FONT,
+        &gc_values);
+}
+
 pub fn applyTree(
     conn: *xcb.Connection,
     root: *tree.Container,
     border_focus_color: u32,
     border_unfocus_color: u32,
+    root_window: xcb.Window,
 ) void {
+    ensureTitleGc(conn, root_window);
+    cached_root_window = root_window;
     // Iterate over outputs
     var out_cur = root.children.first;
     while (out_cur) |output_con| : (out_cur = output_con.next) {
@@ -57,6 +142,11 @@ fn applyRecursive(
             // For tabbed/stacked: only the focused child should be mapped
             const hide_unfocused = (con.layout == .tabbed or con.layout == .stacked) and
                 con.children.len() > 1;
+
+            // Draw tab bar / stacked headers if applicable
+            if (hide_unfocused and title_gc != 0) {
+                drawTitleBars(conn, con);
+            }
 
             // Single pass: process tiling, collect floating/fullscreen for deferred rendering
             var floating_buf: [32]*tree.Container = undefined;

@@ -10,7 +10,7 @@ extern "c" fn setsid() std.c.pid_t;
 /// `status_command` is the i3bar-protocol status command (e.g. "i3blocks").
 /// `position` is "top" or "bottom".
 pub fn spawnBar(status_command: []const u8, position: []const u8) void {
-    _ = position; // TODO: pass position to bar via IPC GET_BAR_CONFIG
+    _ = position; // Bar reads position via IPC GET_BAR_CONFIG at startup
 
     if (status_command.len == 0) return;
 
