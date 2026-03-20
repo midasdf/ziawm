@@ -238,14 +238,19 @@ fn buildBarConfigJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
     const cfg = ctx.config orelse return "{}";
     var fbs = std.io.fixedBufferStream(buf);
     const w = fbs.writer();
-    std.fmt.format(w, "{{\"id\":\"bar-0\",\"mode\":\"dock\",\"position\":\"{s}\",\"status_command\":\"{s}\",\"bar_height\":20,\"colors\":{{\"background\":\"{s}\",\"statusline\":\"{s}\",\"focused_workspace_bg\":\"{s}\",\"focused_workspace_text\":\"{s}\"}}}}", .{
-        cfg.bar.position,
-        cfg.bar.status_command,
-        cfg.bar.bg_color,
-        cfg.bar.statusline_color,
-        cfg.focused_bg,
-        cfg.focused_text,
-    }) catch return "{}";
+    w.writeAll("{\"id\":\"bar-0\",\"mode\":\"dock\",\"position\":\"") catch return "{}";
+    jsonEscapeWrite(w, cfg.bar.position) catch return "{}";
+    w.writeAll("\",\"status_command\":\"") catch return "{}";
+    jsonEscapeWrite(w, cfg.bar.status_command) catch return "{}";
+    w.writeAll("\",\"bar_height\":20,\"colors\":{\"background\":\"") catch return "{}";
+    jsonEscapeWrite(w, cfg.bar.bg_color) catch return "{}";
+    w.writeAll("\",\"statusline\":\"") catch return "{}";
+    jsonEscapeWrite(w, cfg.bar.statusline_color) catch return "{}";
+    w.writeAll("\",\"focused_workspace_bg\":\"") catch return "{}";
+    jsonEscapeWrite(w, cfg.focused_bg) catch return "{}";
+    w.writeAll("\",\"focused_workspace_text\":\"") catch return "{}";
+    jsonEscapeWrite(w, cfg.focused_text) catch return "{}";
+    w.writeAll("\"}}") catch return "{}";
     return fbs.getWritten();
 }
 

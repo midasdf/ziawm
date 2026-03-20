@@ -58,6 +58,19 @@ pub const EventContext = struct {
 };
 
 /// Dispatch an X11 event to the appropriate handler.
+/// Write a JSON-escaped string to writer.
+fn jsonEscapeWrite(w: anytype, s: []const u8) !void {
+    for (s) |ch| {
+        switch (ch) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            else => {
+                if (ch >= 0x20) try w.writeByte(ch);
+            },
+        }
+    }
+}
+
 /// Broadcast an IPC event to all subscribed clients.
 pub fn broadcastIpcEvent(ctx: *EventContext, event_type: ipc.EventType, payload: []const u8) void {
     const mask_bit: u8 = switch (event_type) {
@@ -1468,10 +1481,15 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
         updateNumberOfDesktops(ctx);
         relayoutAndRender(ctx);
 
-        // Broadcast workspace event
+        // Broadcast workspace event (with JSON-escaped name)
         const ws_name = if (target_ws.workspace) |wsd| wsd.name else "?";
         var ev_buf: [256]u8 = undefined;
-        const ev_json = std.fmt.bufPrint(&ev_buf, "{{\"change\":\"focus\",\"current\":{{\"name\":\"{s}\"}}}}", .{ws_name}) catch "";
+        var ev_fbs = std.io.fixedBufferStream(&ev_buf);
+        const ev_w = ev_fbs.writer();
+        ev_w.writeAll("{\"change\":\"focus\",\"current\":{\"name\":\"") catch {};
+        jsonEscapeWrite(ev_w, ws_name) catch {};
+        ev_w.writeAll("\"}}") catch {};
+        const ev_json = ev_fbs.getWritten();
         if (ev_json.len > 0) broadcastIpcEvent(ctx, .workspace, ev_json);
     }
 }
@@ -1840,9 +1858,14 @@ fn executeMode(ctx: *EventContext, cmd: command_mod.Command) void {
     ctx.current_mode = duped;
     std.debug.print("zephwm: switched to mode \"{s}\"\n", .{duped});
 
-    // Broadcast mode event
+    // Broadcast mode event (with JSON-escaped name)
     var ev_buf: [128]u8 = undefined;
-    const ev_json = std.fmt.bufPrint(&ev_buf, "{{\"change\":\"{s}\"}}", .{duped}) catch "";
+    var ev_fbs = std.io.fixedBufferStream(&ev_buf);
+    const ev_w = ev_fbs.writer();
+    ev_w.writeAll("{\"change\":\"") catch {};
+    jsonEscapeWrite(ev_w, duped) catch {};
+    ev_w.writeAll("\"}") catch {};
+    const ev_json = ev_fbs.getWritten();
     if (ev_json.len > 0) broadcastIpcEvent(ctx, .mode, ev_json);
 }
 
