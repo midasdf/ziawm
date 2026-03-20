@@ -141,17 +141,8 @@ fn buildWorkspacesJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
             // A workspace is "visible" if it's the focused workspace on its output
             const visible = isVisibleWorkspace(ws, out_con);
             const focused = ws.is_focused;
-            // Check urgency on any child window
-            var urgent = false;
-            var child_cur = ws.children.first;
-            while (child_cur) |child| : (child_cur = child.next) {
-                if (child.window) |wd| {
-                    if (wd.urgency) {
-                        urgent = true;
-                        break;
-                    }
-                }
-            }
+            // Check urgency from workspace data (set by urgency propagation)
+            const urgent = if (ws.workspace) |wsd| wsd.urgent else false;
 
             std.fmt.format(w, "{{\"num\":{d},\"name\":\"", .{num}) catch return "[]";
             jsonEscapeWrite(w, name) catch return "[]";

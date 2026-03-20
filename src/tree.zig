@@ -36,6 +36,7 @@ pub const WorkspaceData = struct {
     name: []const u8,
     num: ?i32 = null,
     output_name: []const u8 = "",
+    urgent: bool = false,
 };
 
 pub const ChildList = struct {

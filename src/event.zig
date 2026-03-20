@@ -1298,6 +1298,22 @@ fn handlePropertyNotify(ctx: *EventContext, ev: *xcb.PropertyNotifyEvent) void {
                 const urgency_flag: u32 = 256; // XUrgencyHint
                 if (con.window) |*wd| {
                     wd.urgency = (flags.* & urgency_flag) != 0;
+                    // Propagate urgency to workspace
+                    if (wd.urgency) {
+                        var ws_con = con.parent;
+                        while (ws_con) |p| : (ws_con = p.parent) {
+                            if (p.type == .workspace) {
+                                if (p.workspace) |*wsd| {
+                                    // Only set urgent if workspace is not focused
+                                    if (!p.is_focused) {
+                                        wsd.urgent = true;
+                                        broadcastIpcEvent(ctx, .workspace, "{\"change\":\"urgent\"}");
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1695,6 +1711,18 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
                             migrateStickyWindows(current_ws, prev_ws);
                             clearFocusedPath(current_ws);
                             setFocus(ctx, prev_ws);
+                            // Clear urgency on focused workspace
+                            if (prev_ws.workspace) |*wsd| {
+                                if (wsd.urgent) {
+                                    wsd.urgent = false;
+                                    var baf_child_cur = prev_ws.children.first;
+                                    while (baf_child_cur) |baf_child| : (baf_child_cur = baf_child.next) {
+                                        if (baf_child.window) |*wd| {
+                                            wd.urgency = false;
+                                        }
+                                    }
+                                }
+                            }
                             if (prev_ws.children.first) |child| {
                                 setFocus(ctx, getDeepestChild(child));
                             }
@@ -1730,6 +1758,19 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
 
         // Focus new workspace
         setFocus(ctx, target_ws);
+        // Clear urgency on focused workspace
+        if (target_ws.workspace) |*wsd| {
+            if (wsd.urgent) {
+                wsd.urgent = false;
+                // Clear urgency on all windows in this workspace
+                var child_cur = target_ws.children.first;
+                while (child_cur) |child| : (child_cur = child.next) {
+                    if (child.window) |*wd| {
+                        wd.urgency = false;
+                    }
+                }
+            }
+        }
         // Also focus first child if exists
         if (target_ws.children.first) |child| {
             setFocus(ctx, getDeepestChild(child));
