@@ -1,4 +1,5 @@
 // Render module — apply tree layout to X11 windows
+const std = @import("std");
 const xcb = @import("xcb.zig");
 const tree = @import("tree.zig");
 
@@ -8,11 +9,13 @@ var title_font: u32 = 0;
 var title_gc_initialized: bool = false;
 var cached_root_window: xcb.Window = 0;
 
-/// Walk the container tree and apply geometry to X11 windows.
-/// Only the focused (visible) workspace per output is rendered;
-/// windows on other workspaces are unmapped.
-/// Initialize GC and font for title bar rendering (lazy, once).
-const TAB_BAR_HEIGHT: u16 = 16;
+/// Font metrics, populated by ensureTitleGc
+var font_ascent: u16 = 10;
+var font_descent: u16 = 2;
+var font_char_width: u16 = 6;
+
+/// Dynamically computed from font metrics. Exported for layout.zig.
+pub var tab_bar_height: u16 = 16;
 
 /// Draw title bars for tabbed or stacked layout containers.
 /// Draws directly on the root window using XCB core font.
@@ -22,34 +25,38 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
     const child_count = con.children.len();
     if (child_count == 0) return;
 
+    const text_y_offset: i16 = @intCast(font_ascent + 2);
+    const tbh: u16 = tab_bar_height;
+
     if (con.layout == .tabbed) {
-        // Tabbed: one row of tabs, each tab is rect.w / child_count wide
         const tab_w: u16 = @intCast(r.w / @as(u32, @intCast(child_count)));
         var x: i16 = @intCast(r.x);
         var cur = con.children.first;
         while (cur) |child| : (cur = child.next) {
             if (child.is_floating) continue;
-            // Background
             const bg = if (child.is_focused) @as(u32, 0x285577) else @as(u32, 0x333333);
             const bg_val = [_]u32{bg};
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_BACKGROUND, &bg_val);
             const fg_val = [_]u32{bg};
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &fg_val);
-            const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = x, .y = @intCast(r.y), .width = tab_w, .height = TAB_BAR_HEIGHT }};
+            const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = x, .y = @intCast(r.y), .width = tab_w, .height = tbh }};
             _ = xcb.c.xcb_poly_fill_rectangle(conn, root_win, title_gc, 1, &rect);
 
-            // Text
             const title = if (child.window) |wd| wd.title else if (child.workspace) |wsd| wsd.name else "?";
-            const text_len: u8 = @intCast(@min(title.len, 255));
+            // Truncate to fit tab width (leave 8px padding)
+            const max_chars: usize = if (font_char_width > 0 and tab_w > 8)
+                @intCast((tab_w - 8) / font_char_width)
+            else
+                0;
+            const text_len: u8 = @intCast(@min(title.len, @min(max_chars, 255)));
             if (text_len > 0) {
                 const text_fg = [_]u32{0xffffff};
                 _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
-                _ = xcb.c.xcb_image_text_8(conn, text_len, root_win, title_gc, x + 4, @as(i16, @intCast(r.y)) + 12, title.ptr);
+                _ = xcb.c.xcb_image_text_8(conn, text_len, root_win, title_gc, x + 4, @as(i16, @intCast(r.y)) + text_y_offset, title.ptr);
             }
             x += @intCast(tab_w);
         }
     } else if (con.layout == .stacked) {
-        // Stacked: one row per child, each TAB_BAR_HEIGHT tall
         var y: i16 = @intCast(r.y);
         var cur = con.children.first;
         while (cur) |child| : (cur = child.next) {
@@ -57,17 +64,21 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
             const bg = if (child.is_focused) @as(u32, 0x285577) else @as(u32, 0x333333);
             const bg_val = [_]u32{bg};
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &bg_val);
-            const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = @intCast(r.x), .y = y, .width = @intCast(r.w), .height = TAB_BAR_HEIGHT }};
+            const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = @intCast(r.x), .y = y, .width = @intCast(r.w), .height = tbh }};
             _ = xcb.c.xcb_poly_fill_rectangle(conn, root_win, title_gc, 1, &rect);
 
             const title = if (child.window) |wd| wd.title else if (child.workspace) |wsd| wsd.name else "?";
-            const text_len: u8 = @intCast(@min(title.len, 255));
+            const max_chars: usize = if (font_char_width > 0 and r.w > 8)
+                @intCast((r.w - 8) / font_char_width)
+            else
+                0;
+            const text_len: u8 = @intCast(@min(title.len, @min(max_chars, 255)));
             if (text_len > 0) {
                 const text_fg = [_]u32{0xffffff};
                 _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
-                _ = xcb.c.xcb_image_text_8(conn, text_len, root_win, title_gc, @as(i16, @intCast(r.x)) + 4, y + 12, title.ptr);
+                _ = xcb.c.xcb_image_text_8(conn, text_len, root_win, title_gc, @as(i16, @intCast(r.x)) + 4, y + text_y_offset, title.ptr);
             }
-            y += TAB_BAR_HEIGHT;
+            y += @intCast(tbh);
         }
     }
 }
@@ -76,9 +87,45 @@ fn ensureTitleGc(conn: *xcb.Connection, root_window: xcb.Window) void {
     if (title_gc_initialized) return;
     title_gc_initialized = true;
 
-    // Open a basic X core font
+    // Font fallback list — try each until one succeeds
+    const font_names = [_]struct { name: [*]const u8, len: u16 }{
+        .{ .name = "fixed", .len = 5 },
+        .{ .name = "-misc-fixed-medium-r-semicondensed--13-120-75-75-c-60-iso10646-1", .len = 65 },
+        .{ .name = "-misc-fixed-medium-r-normal--14-130-75-75-c-70-iso10646-1", .len = 57 },
+        .{ .name = "cursor", .len = 6 },
+    };
+
     title_font = xcb.generateId(conn);
-    _ = xcb.c.xcb_open_font(conn, title_font, 5, "fixed");
+    var font_opened = false;
+    for (font_names) |f| {
+        const cookie = xcb.c.xcb_open_font_checked(conn, title_font, f.len, f.name);
+        const err = xcb.c.xcb_request_check(conn, cookie);
+        if (err == null) {
+            font_opened = true;
+            break;
+        }
+        std.c.free(err);
+    }
+
+    if (!font_opened) {
+        // All fonts failed — title bars will have no text
+        title_gc_initialized = false;
+        return;
+    }
+
+    // Query font metrics
+    const qf_cookie = xcb.c.xcb_query_font(conn, title_font);
+    if (xcb.c.xcb_query_font_reply(conn, qf_cookie, null)) |reply| {
+        font_ascent = @intCast(reply.*.font_ascent);
+        font_descent = @intCast(reply.*.font_descent);
+        font_char_width = if (reply.*.max_bounds.character_width > 0)
+            @intCast(reply.*.max_bounds.character_width)
+        else
+            6;
+        std.c.free(reply);
+    }
+
+    tab_bar_height = font_ascent + font_descent + 4;
 
     title_gc = xcb.generateId(conn);
     const gc_values = [_]u32{ 0xffffff, 0x285577, title_font };
