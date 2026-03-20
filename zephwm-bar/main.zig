@@ -39,6 +39,9 @@ const BarWindow = struct {
     width: u16 = 0,
     output_y: i16 = 0,
     output_height: u16 = 0,
+    // Per-bar render geometry for status blocks (avoids shared state across bars)
+    block_render_x: [MAX_STATUS_BLOCKS]u16 = .{0} ** MAX_STATUS_BLOCKS,
+    block_render_w: [MAX_STATUS_BLOCKS]u16 = .{0} ** MAX_STATUS_BLOCKS,
 
     fn getOutputName(self: *const BarWindow) []const u8 {
         return self.output_name[0..self.output_name_len];
@@ -52,8 +55,6 @@ const StatusBlock = struct {
     instance_len: u8 = 0,
     full_text: [256]u8 = undefined,
     full_text_len: u16 = 0,
-    render_x: u16 = 0,
-    render_width: u16 = 0,
 };
 
 const MAX_STATUS_BLOCKS = 32;
@@ -240,6 +241,8 @@ pub fn main() !void {
     var click_events_enabled: bool = false;
     var status_stdin_fd: std.posix.fd_t = -1;
     var json_mode: bool = false;
+    var status_read_buf: [8192]u8 = undefined;
+    var status_read_len: usize = 0;
 
     // Spawn status_command and read from its stdout via pipe
     var status_pipe_fd: std.posix.fd_t = -1;
@@ -361,7 +364,7 @@ pub fn main() !void {
         // Read status command output (non-blocking)
         if (status_pipe_fd >= 0) {
             const prev_click_enabled = click_events_enabled;
-            parseStatusUpdate(status_pipe_fd, &status_blocks, &status_block_count, &click_events_enabled, &json_mode);
+            parseStatusUpdate(status_pipe_fd, &status_blocks, &status_block_count, &click_events_enabled, &json_mode, &status_read_buf, &status_read_len);
             // When click_events first enabled, send the opening bracket
             if (click_events_enabled and !prev_click_enabled and status_stdin_fd >= 0) {
                 _ = std.posix.write(status_stdin_fd, "[\n") catch {};
@@ -467,7 +470,7 @@ fn findNumEnd(data: []const u8, start: usize) usize {
 fn drawBar(
     conn: *c.xcb_connection_t,
     dpy: *c.Display,
-    bar: *const BarWindow,
+    bar: *BarWindow,
     font: *c.XftFont,
     gc: u32,
     ws_names: *[MaxWorkspaces][32]u8,
@@ -555,9 +558,9 @@ fn drawBar(
             if (status_x < block_w) break; // no room
             status_x -= block_w;
 
-            // Record render position for click detection
-            blk.render_x = status_x;
-            blk.render_width = block_w;
+            // Record render position for click detection (per-bar)
+            bar.block_render_x[bi] = status_x;
+            bar.block_render_w[bi] = block_w;
 
             // Draw text
             c.XftDrawStringUtf8(draw, fg_color, font, @intCast(status_x + STATUS_PAD), text_y, ft.ptr, @intCast(ft.len));
@@ -621,25 +624,27 @@ fn handleClick(
 
     // Check status blocks for clicks (if click protocol enabled)
     if (click_events_enabled and status_stdin_fd >= 0) {
-        for (status_blocks[0..status_block_count]) |*blk| {
-            if (blk.render_width == 0) continue;
-            const bx = @as(i16, @intCast(blk.render_x));
-            const bw = @as(i16, @intCast(blk.render_width));
+        for (0..status_block_count) |i| {
+            const blk = &status_blocks[i];
+            const bw_val = bar.block_render_w[i];
+            if (bw_val == 0) continue;
+            const bx = @as(i16, @intCast(bar.block_render_x[i]));
+            const bw = @as(i16, @intCast(bw_val));
             if (click_x >= bx and click_x < bx + bw) {
                 // Send click event to status_command stdin
                 var click_buf: [512]u8 = undefined;
                 var click_fbs = std.io.fixedBufferStream(&click_buf);
                 const cw = click_fbs.writer();
                 cw.writeAll(",{\"name\":\"") catch {};
-                cw.writeAll(blk.name[0..blk.name_len]) catch {};
+                jsonEscapeWrite(cw, blk.name[0..blk.name_len]) catch {};
                 cw.writeAll("\",\"instance\":\"") catch {};
-                cw.writeAll(blk.instance[0..blk.instance_len]) catch {};
+                jsonEscapeWrite(cw, blk.instance[0..blk.instance_len]) catch {};
                 cw.print("\",\"button\":{d}", .{button}) catch {};
                 cw.print(",\"x\":{d},\"y\":{d}", .{ click_x, click_y }) catch {};
                 cw.print(",\"relative_x\":{d},\"relative_y\":{d}", .{
                     click_x - bx, click_y,
                 }) catch {};
-                cw.print(",\"width\":{d},\"height\":{d}", .{ blk.render_width, BAR_HEIGHT }) catch {};
+                cw.print(",\"width\":{d},\"height\":{d}", .{ bw_val, BAR_HEIGHT }) catch {};
                 cw.writeAll("}\n") catch {};
                 _ = std.posix.write(status_stdin_fd, click_fbs.getWritten()) catch {};
                 break;
@@ -779,29 +784,52 @@ fn spawnStatusCommand(cmd: []const u8) struct { stdout_fd: std.posix.fd_t, stdin
 
 /// Parse status command output into StatusBlock array.
 /// Supports both plain text and i3bar JSON protocol.
+/// Uses a persistent buffer to handle lines that span multiple reads.
 fn parseStatusUpdate(
     fd: std.posix.fd_t,
     blocks: *[MAX_STATUS_BLOCKS]StatusBlock,
     block_count: *usize,
     click_enabled: *bool,
     json_mode: *bool,
+    persist_buf: *[8192]u8,
+    persist_len: *usize,
 ) void {
-    var read_buf: [4096]u8 = undefined;
-    const n = std.posix.read(fd, &read_buf) catch return;
+    // Append new data to persistent buffer
+    const remaining = persist_buf.len - persist_len.*;
+    if (remaining == 0) {
+        // Buffer full with no newline found — discard and reset
+        persist_len.* = 0;
+        return;
+    }
+    const n = std.posix.read(fd, persist_buf[persist_len.*..]) catch return;
     if (n == 0) return;
-    const data = read_buf[0..n];
+    persist_len.* += n;
 
-    // Find the last complete line
+    // Process all complete lines (terminated by \n) in the buffer
     var last_line: []const u8 = "";
-    var line_start: usize = 0;
-    for (data, 0..) |ch, i| {
-        if (ch == '\n') {
-            if (i > line_start) {
-                last_line = data[line_start..i];
+    var last_line_end: usize = 0;
+    {
+        var line_start: usize = 0;
+        for (persist_buf[0..persist_len.*], 0..) |ch, i| {
+            if (ch == '\n') {
+                if (i > line_start) {
+                    last_line = persist_buf[line_start..i];
+                }
+                last_line_end = i + 1;
+                line_start = i + 1;
             }
-            line_start = i + 1;
         }
     }
+
+    // Shift remaining partial data to the front
+    if (last_line_end > 0) {
+        const leftover = persist_len.* - last_line_end;
+        if (leftover > 0) {
+            std.mem.copyForwards(u8, persist_buf[0..leftover], persist_buf[last_line_end..persist_len.*]);
+        }
+        persist_len.* = leftover;
+    }
+
     if (last_line.len == 0) return;
 
     // Trim leading whitespace/protocol markers
@@ -867,6 +895,19 @@ fn parseStatusUpdate(
         @memcpy(blocks[0].full_text[0..copy_len], line[0..copy_len]);
         blocks[0].full_text_len = @intCast(copy_len);
         block_count.* = 1;
+    }
+}
+
+/// Escape a string for JSON output: replace \ with \\ and " with \".
+fn jsonEscapeWrite(w: anytype, s: []const u8) !void {
+    for (s) |ch| {
+        switch (ch) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            else => {
+                if (ch >= 0x20) try w.writeByte(ch);
+            },
+        }
     }
 }
 

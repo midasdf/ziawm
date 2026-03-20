@@ -952,7 +952,7 @@ fn handleKeyPress(ctx: *EventContext, ev: *xcb.KeyPressEvent) void {
                 jsonEscapeWrite(bind_w, name) catch {};
                 bind_w.writeAll("\"}}") catch {};
                 const bind_json = bind_fbs.getWritten();
-                if (bind_json.len > 0) broadcastIpcEvent(ctx, .binding, bind_json);
+                if (bind_json.len > 0 and bind_json.len < bind_buf.len) broadcastIpcEvent(ctx, .binding, bind_json);
             }
             // Parse and execute command
             if (command_mod.parse(kb.command)) |cmd| {
@@ -1929,6 +1929,15 @@ fn migrateStickyWindows(src_ws: *tree.Container, dst_ws: *tree.Container) void {
             dst_ws.children.append(child);
             child.rect.x = dst_out_rect.x + rel_x;
             child.rect.y = dst_out_rect.y + rel_y;
+
+            // Clamp to keep window inside destination output bounds
+            const max_x = dst_out_rect.x + @as(i32, @intCast(dst_out_rect.w)) - @as(i32, @intCast(child.rect.w));
+            const max_y = dst_out_rect.y + @as(i32, @intCast(dst_out_rect.h)) - @as(i32, @intCast(child.rect.h));
+            if (child.rect.x < dst_out_rect.x) child.rect.x = dst_out_rect.x;
+            if (child.rect.y < dst_out_rect.y) child.rect.y = dst_out_rect.y;
+            if (child.rect.x > max_x) child.rect.x = max_x;
+            if (child.rect.y > max_y) child.rect.y = max_y;
+            child.window_rect = child.rect;
         }
         cur = nxt;
     }
