@@ -1408,6 +1408,7 @@ pub fn executeCommand(ctx: *EventContext, cmd: command_mod.Command) void {
         .kill => executeKill(ctx, cmd),
         .exec => executeExec(cmd),
         .floating => executeFloating(ctx),
+        .border => executeBorder(ctx, cmd),
         .fullscreen => executeFullscreen(ctx),
         .mark => executeMark(ctx, cmd),
         .unmark => executeUnmark(ctx, cmd),
@@ -1942,7 +1943,6 @@ fn executeFloating(ctx: *EventContext) void {
 fn executeSticky(ctx: *EventContext, cmd: command_mod.Command) void {
     const arg = cmd.args[0] orelse return;
     const focused = getFocusedContainer(ctx.tree_root) orelse return;
-    // sticky only applies to floating containers
     if (!focused.is_floating) return;
     if (std.mem.eql(u8, arg, "enable")) {
         focused.is_sticky = true;
@@ -1953,18 +1953,14 @@ fn executeSticky(ctx: *EventContext, cmd: command_mod.Command) void {
     }
 }
 
-/// Move sticky floating containers from src_ws to dst_ws, adjusting coordinates
-/// for the destination output geometry.
 fn migrateStickyWindows(src_ws: *tree.Container, dst_ws: *tree.Container) void {
-    // Determine output rects for coordinate adjustment
     const src_out_rect: tree.Rect = if (src_ws.parent) |p| p.rect else src_ws.rect;
     const dst_out_rect: tree.Rect = if (dst_ws.parent) |p| p.rect else dst_ws.rect;
 
     var cur = src_ws.children.first;
     while (cur) |child| {
-        const nxt = child.next; // save next before potential unlink
+        const nxt = child.next;
         if (child.is_floating and child.is_sticky) {
-            // Compute position relative to src output, apply to dst output
             const rel_x: i32 = child.rect.x - src_out_rect.x;
             const rel_y: i32 = child.rect.y - src_out_rect.y;
             child.unlink();
@@ -1972,8 +1968,6 @@ fn migrateStickyWindows(src_ws: *tree.Container, dst_ws: *tree.Container) void {
             dst_ws.children.append(child);
             child.rect.x = dst_out_rect.x + rel_x;
             child.rect.y = dst_out_rect.y + rel_y;
-
-            // Clamp to keep window inside destination output bounds
             const max_x = dst_out_rect.x + @as(i32, @intCast(dst_out_rect.w)) - @as(i32, @intCast(child.rect.w));
             const max_y = dst_out_rect.y + @as(i32, @intCast(dst_out_rect.h)) - @as(i32, @intCast(child.rect.h));
             if (child.rect.x < dst_out_rect.x) child.rect.x = dst_out_rect.x;
@@ -1984,6 +1978,33 @@ fn migrateStickyWindows(src_ws: *tree.Container, dst_ws: *tree.Container) void {
         }
         cur = nxt;
     }
+}
+
+fn executeBorder(ctx: *EventContext, cmd: command_mod.Command) void {
+    const arg = cmd.args[0] orelse return;
+    const focused = getFocusedContainer(ctx.tree_root) orelse return;
+    if (focused.type != .window) return;
+
+    if (std.mem.eql(u8, arg, "none")) {
+        focused.border_style = .none;
+    } else if (std.mem.eql(u8, arg, "pixel")) {
+        focused.border_style = .pixel;
+        if (cmd.args[1]) |width_str| {
+            if (std.fmt.parseInt(i16, width_str, 10)) |w| {
+                focused.border_width_override = w;
+            } else |_| {}
+        }
+    } else if (std.mem.eql(u8, arg, "normal")) {
+        focused.border_style = .normal;
+    } else if (std.mem.eql(u8, arg, "toggle")) {
+        focused.border_style = switch (focused.border_style) {
+            .none => .pixel,
+            .pixel => .normal,
+            .normal => .none,
+        };
+    }
+
+    relayoutAndRender(ctx);
 }
 
 fn executeFullscreen(ctx: *EventContext) void {

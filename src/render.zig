@@ -312,14 +312,22 @@ fn applyWindow(
     const frame_h: u32 = r.h + @as(u32, title_offset);
     const frame_y: i32 = r.y - @as(i32, @intCast(title_offset));
     if (frame_id != 0) {
+        // Compute effective border width from per-window style
+        const effective_border: u16 = blk: {
+            if (con.border_style == .none) break :blk 0;
+            if (con.border_width_override >= 0) break :blk @intCast(con.border_width_override);
+            break :blk 2; // fallback default
+        };
         const values = [_]u32{
             @bitCast(r.x),
             @bitCast(frame_y),
             r.w,
             frame_h,
+            @as(u32, effective_border),
         };
         const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
-            xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
+            xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT |
+            xcb.CONFIG_WINDOW_BORDER_WIDTH;
         _ = xcb.configureWindow(conn, frame_id, mask, &values);
 
         // Configure client inside frame

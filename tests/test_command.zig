@@ -274,6 +274,27 @@ test "parse sticky toggle" {
     try std.testing.expectEqualStrings("toggle", cmd.args[0].?);
 }
 
+// ---- border ----
+
+test "parse border none" {
+    const cmd = command.parse("border none") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.border, cmd.type);
+    try std.testing.expectEqualStrings("none", cmd.args[0].?);
+}
+
+test "parse border pixel 3" {
+    const cmd = command.parse("border pixel 3") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.border, cmd.type);
+    try std.testing.expectEqualStrings("pixel", cmd.args[0].?);
+    try std.testing.expectEqualStrings("3", cmd.args[1].?);
+}
+
+test "parse border toggle" {
+    const cmd = command.parse("border toggle") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.border, cmd.type);
+    try std.testing.expectEqualStrings("toggle", cmd.args[0].?);
+}
+
 // ---- invalid ----
 
 test "parse invalid returns null" {
