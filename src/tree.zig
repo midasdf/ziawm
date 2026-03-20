@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 pub const ContainerType = enum { root, output, workspace, split_con, window };
 pub const Layout = enum { hsplit, vsplit, tabbed, stacked };
 pub const FullscreenMode = enum { none, window, global };
+pub const BorderStyle = enum { pixel, none, normal };
 
 /// Screen geometry. i32 for x/y to support negative positions (multi-monitor).
 pub const Rect = struct {
@@ -36,6 +37,7 @@ pub const WorkspaceData = struct {
     name: []const u8,
     num: ?i32 = null,
     output_name: []const u8 = "",
+    urgent: bool = false,
 };
 
 pub const ChildList = struct {
@@ -129,6 +131,8 @@ pub const Container = struct {
     is_focused: bool = false,
     is_scratchpad: bool = false,
     is_sticky: bool = false,
+    border_style: BorderStyle = .pixel,
+    border_width_override: i16 = -1, // -1 = use config default
     dirty: bool = true,
     marks: [4]?[]const u8 = .{null} ** 4,
     mark_count: u8 = 0,

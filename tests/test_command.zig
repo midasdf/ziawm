@@ -53,6 +53,20 @@ test "parse focus output right" {
     try std.testing.expectEqualStrings("right", cmd.args[0].?);
 }
 
+// ---- move workspace to output ----
+
+test "parse move workspace to output right" {
+    const cmd = command.parse("move workspace to output right") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.move_workspace_to_output, cmd.type);
+    try std.testing.expectEqualStrings("right", cmd.args[0].?);
+}
+
+test "parse move workspace to output named" {
+    const cmd = command.parse("move workspace to output HDMI-1") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.move_workspace_to_output, cmd.type);
+    try std.testing.expectEqualStrings("HDMI-1", cmd.args[0].?);
+}
+
 // ---- move container to workspace ----
 
 test "parse move container to workspace number 3" {
@@ -257,6 +271,27 @@ test "parse sticky disable" {
 test "parse sticky toggle" {
     const cmd = command.parse("sticky toggle") orelse return error.ParseFailed;
     try std.testing.expectEqual(command.CommandType.sticky, cmd.type);
+    try std.testing.expectEqualStrings("toggle", cmd.args[0].?);
+}
+
+// ---- border ----
+
+test "parse border none" {
+    const cmd = command.parse("border none") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.border, cmd.type);
+    try std.testing.expectEqualStrings("none", cmd.args[0].?);
+}
+
+test "parse border pixel 3" {
+    const cmd = command.parse("border pixel 3") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.border, cmd.type);
+    try std.testing.expectEqualStrings("pixel", cmd.args[0].?);
+    try std.testing.expectEqualStrings("3", cmd.args[1].?);
+}
+
+test "parse border toggle" {
+    const cmd = command.parse("border toggle") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.border, cmd.type);
     try std.testing.expectEqualStrings("toggle", cmd.args[0].?);
 }
 

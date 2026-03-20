@@ -12,6 +12,7 @@ pub const CommandType = enum {
     kill,
     exec,
     floating,
+    border,
     fullscreen,
     mark,
     unmark,
@@ -21,6 +22,7 @@ pub const CommandType = enum {
     restart,
     exit,
     focus_output,
+    move_workspace_to_output,
     nop,
     sticky,
 };
@@ -82,6 +84,13 @@ pub fn parse(input: []const u8) ?Command {
         return Command{ .type = .move_workspace, .args = .{ rest, null, null, null }, .criteria = crit };
     }
 
+    // "move workspace to output NAME/left/right/up/down"
+    if (startsWith(u8, s, "move workspace to output ")) {
+        const rest = trimLeft(s["move workspace to output ".len..]);
+        if (rest.len == 0) return null;
+        return Command{ .type = .move_workspace_to_output, .args = .{ rest, null, null, null }, .criteria = crit };
+    }
+
     // "move scratchpad"
     if (std.mem.eql(u8, s, "move scratchpad")) {
         return Command{ .type = .scratchpad, .args = .{ "move", null, null, null }, .criteria = crit };
@@ -133,6 +142,18 @@ pub fn parse(input: []const u8) ?Command {
         const rest = trimLeft(s["floating ".len..]);
         if (rest.len == 0) return null;
         return Command{ .type = .floating, .args = .{ rest, null, null, null }, .criteria = crit };
+    }
+
+    // "border none/pixel/pixel N/normal/toggle"
+    if (startsWith(u8, s, "border ")) {
+        const rest = trimLeft(s["border ".len..]);
+        if (rest.len == 0) return null;
+        // Check for "pixel N" pattern
+        if (startsWith(u8, rest, "pixel ")) {
+            const num_str = trimLeft(rest["pixel ".len..]);
+            return Command{ .type = .border, .args = .{ "pixel", num_str, null, null }, .criteria = crit };
+        }
+        return Command{ .type = .border, .args = .{ rest, null, null, null }, .criteria = crit };
     }
 
     // "fullscreen toggle" (or just "fullscreen")

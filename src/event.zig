@@ -139,6 +139,7 @@ fn handleRandrScreenChange(ctx: *EventContext) void {
         std.debug.print("zephwm: failed to update outputs: {}\n", .{err});
         return;
     };
+    broadcastIpcEvent(ctx, .output, "{\"change\":\"unspecified\"}");
     relayoutAndRender(ctx);
     updateAllEwmh(ctx);
 }
@@ -1297,6 +1298,22 @@ fn handlePropertyNotify(ctx: *EventContext, ev: *xcb.PropertyNotifyEvent) void {
                 const urgency_flag: u32 = 256; // XUrgencyHint
                 if (con.window) |*wd| {
                     wd.urgency = (flags.* & urgency_flag) != 0;
+                    // Propagate urgency to workspace
+                    if (wd.urgency) {
+                        var ws_con = con.parent;
+                        while (ws_con) |p| : (ws_con = p.parent) {
+                            if (p.type == .workspace) {
+                                if (p.workspace) |*wsd| {
+                                    // Only set urgent if workspace is not focused
+                                    if (!p.is_focused) {
+                                        wsd.urgent = true;
+                                        broadcastIpcEvent(ctx, .workspace, "{\"change\":\"urgent\"}");
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1391,6 +1408,7 @@ pub fn executeCommand(ctx: *EventContext, cmd: command_mod.Command) void {
         .kill => executeKill(ctx, cmd),
         .exec => executeExec(cmd),
         .floating => executeFloating(ctx),
+        .border => executeBorder(ctx, cmd),
         .fullscreen => executeFullscreen(ctx),
         .mark => executeMark(ctx, cmd),
         .unmark => executeUnmark(ctx, cmd),
@@ -1403,6 +1421,7 @@ pub fn executeCommand(ctx: *EventContext, cmd: command_mod.Command) void {
         },
         .resize => executeResize(ctx, cmd),
         .focus_output => executeFocusOutput(ctx, cmd),
+        .move_workspace_to_output => executeMoveWorkspaceToOutput(ctx, cmd),
         .nop => {},
         .sticky => executeSticky(ctx, cmd),
     }
@@ -1694,6 +1713,18 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
                             migrateStickyWindows(current_ws, prev_ws);
                             clearFocusedPath(current_ws);
                             setFocus(ctx, prev_ws);
+                            // Clear urgency on focused workspace
+                            if (prev_ws.workspace) |*wsd| {
+                                if (wsd.urgent) {
+                                    wsd.urgent = false;
+                                    var baf_child_cur = prev_ws.children.first;
+                                    while (baf_child_cur) |baf_child| : (baf_child_cur = baf_child.next) {
+                                        if (baf_child.window) |*wd| {
+                                            wd.urgency = false;
+                                        }
+                                    }
+                                }
+                            }
                             if (prev_ws.children.first) |child| {
                                 setFocus(ctx, getDeepestChild(child));
                             }
@@ -1729,6 +1760,19 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
 
         // Focus new workspace
         setFocus(ctx, target_ws);
+        // Clear urgency on focused workspace
+        if (target_ws.workspace) |*wsd| {
+            if (wsd.urgent) {
+                wsd.urgent = false;
+                // Clear urgency on all windows in this workspace
+                var child_cur = target_ws.children.first;
+                while (child_cur) |child| : (child_cur = child.next) {
+                    if (child.window) |*wd| {
+                        wd.urgency = false;
+                    }
+                }
+            }
+        }
         // Also focus first child if exists
         if (target_ws.children.first) |child| {
             setFocus(ctx, getDeepestChild(child));
@@ -1899,7 +1943,6 @@ fn executeFloating(ctx: *EventContext) void {
 fn executeSticky(ctx: *EventContext, cmd: command_mod.Command) void {
     const arg = cmd.args[0] orelse return;
     const focused = getFocusedContainer(ctx.tree_root) orelse return;
-    // sticky only applies to floating containers
     if (!focused.is_floating) return;
     if (std.mem.eql(u8, arg, "enable")) {
         focused.is_sticky = true;
@@ -1910,18 +1953,14 @@ fn executeSticky(ctx: *EventContext, cmd: command_mod.Command) void {
     }
 }
 
-/// Move sticky floating containers from src_ws to dst_ws, adjusting coordinates
-/// for the destination output geometry.
 fn migrateStickyWindows(src_ws: *tree.Container, dst_ws: *tree.Container) void {
-    // Determine output rects for coordinate adjustment
     const src_out_rect: tree.Rect = if (src_ws.parent) |p| p.rect else src_ws.rect;
     const dst_out_rect: tree.Rect = if (dst_ws.parent) |p| p.rect else dst_ws.rect;
 
     var cur = src_ws.children.first;
     while (cur) |child| {
-        const nxt = child.next; // save next before potential unlink
+        const nxt = child.next;
         if (child.is_floating and child.is_sticky) {
-            // Compute position relative to src output, apply to dst output
             const rel_x: i32 = child.rect.x - src_out_rect.x;
             const rel_y: i32 = child.rect.y - src_out_rect.y;
             child.unlink();
@@ -1929,8 +1968,6 @@ fn migrateStickyWindows(src_ws: *tree.Container, dst_ws: *tree.Container) void {
             dst_ws.children.append(child);
             child.rect.x = dst_out_rect.x + rel_x;
             child.rect.y = dst_out_rect.y + rel_y;
-
-            // Clamp to keep window inside destination output bounds
             const max_x = dst_out_rect.x + @as(i32, @intCast(dst_out_rect.w)) - @as(i32, @intCast(child.rect.w));
             const max_y = dst_out_rect.y + @as(i32, @intCast(dst_out_rect.h)) - @as(i32, @intCast(child.rect.h));
             if (child.rect.x < dst_out_rect.x) child.rect.x = dst_out_rect.x;
@@ -1941,6 +1978,33 @@ fn migrateStickyWindows(src_ws: *tree.Container, dst_ws: *tree.Container) void {
         }
         cur = nxt;
     }
+}
+
+fn executeBorder(ctx: *EventContext, cmd: command_mod.Command) void {
+    const arg = cmd.args[0] orelse return;
+    const focused = getFocusedContainer(ctx.tree_root) orelse return;
+    if (focused.type != .window) return;
+
+    if (std.mem.eql(u8, arg, "none")) {
+        focused.border_style = .none;
+    } else if (std.mem.eql(u8, arg, "pixel")) {
+        focused.border_style = .pixel;
+        if (cmd.args[1]) |width_str| {
+            if (std.fmt.parseInt(i16, width_str, 10)) |w| {
+                focused.border_width_override = w;
+            } else |_| {}
+        }
+    } else if (std.mem.eql(u8, arg, "normal")) {
+        focused.border_style = .normal;
+    } else if (std.mem.eql(u8, arg, "toggle")) {
+        focused.border_style = switch (focused.border_style) {
+            .none => .pixel,
+            .pixel => .normal,
+            .normal => .none,
+        };
+    }
+
+    relayoutAndRender(ctx);
 }
 
 fn executeFullscreen(ctx: *EventContext) void {
@@ -2163,6 +2227,54 @@ fn executeFocusOutput(ctx: *EventContext, cmd: command_mod.Command) void {
         }
         relayoutAndRender(ctx);
     }
+}
+
+fn executeMoveWorkspaceToOutput(ctx: *EventContext, cmd: command_mod.Command) void {
+    const direction = cmd.args[0] orelse return;
+    const current_ws = getFocusedWorkspace(ctx.tree_root) orelse return;
+    const current_out = current_ws.parent orelse return;
+    if (current_out.type != .output) return;
+
+    // Find target output
+    const target_out = blk: {
+        if (std.mem.eql(u8, direction, "left")) {
+            break :blk output.findAdjacent(ctx.tree_root, current_out, .left);
+        } else if (std.mem.eql(u8, direction, "right")) {
+            break :blk output.findAdjacent(ctx.tree_root, current_out, .right);
+        } else if (std.mem.eql(u8, direction, "up")) {
+            break :blk output.findAdjacent(ctx.tree_root, current_out, .up);
+        } else if (std.mem.eql(u8, direction, "down")) {
+            break :blk output.findAdjacent(ctx.tree_root, current_out, .down);
+        } else {
+            // Named output
+            break :blk output.findByName(ctx.tree_root, direction);
+        }
+    } orelse return;
+
+    if (target_out == current_out) return;
+
+    // Move workspace to target output
+    current_ws.unlink();
+    target_out.appendChild(current_ws);
+    current_ws.rect = target_out.rect;
+
+    // Update workspace output_name to match target output
+    if (current_ws.workspace) |*wsd| {
+        if (target_out.workspace) |tout_wsd| {
+            wsd.output_name = tout_wsd.output_name;
+        }
+    }
+
+    // Ensure source output still has at least one workspace
+    if (current_out.children.first == null) {
+        if (workspace.create(ctx.allocator, "1", 1)) |new_ws| {
+            current_out.appendChild(new_ws);
+            new_ws.rect = current_out.rect;
+        } else |_| {}
+    }
+
+    relayoutAndRender(ctx);
+    broadcastIpcEvent(ctx, .workspace, "{\"change\":\"move\"}");
 }
 
 /// Static sentinel for the default mode — used for pointer comparison to detect ownership.
