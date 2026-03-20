@@ -45,6 +45,7 @@ pub fn apply(con: *tree.Container, gap: u32, border: u32) void {
             const child = tiling[0];
             child.rect = rect;
             child.window_rect = child.rect;
+            adjustForBorderNormal(child);
             child.dirty = false;
             recurse(child, gap, border);
         },
@@ -92,6 +93,7 @@ fn applyHsplit(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u
 
         child.rect = .{ .x = x, .y = rect.y, .w = w, .h = rect.h };
         child.window_rect = child.rect;
+        adjustForBorderNormal(child);
         child.dirty = false;
         recurse(child, gap, border);
 
@@ -128,6 +130,7 @@ fn applyVsplit(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u
 
         child.rect = .{ .x = rect.x, .y = y, .w = rect.w, .h = h };
         child.window_rect = child.rect;
+        adjustForBorderNormal(child);
         child.dirty = false;
         recurse(child, gap, border);
 
@@ -162,6 +165,18 @@ fn applyStacked(children: []*tree.Container, rect: tree.Rect, gap: u32, border: 
         child.window_rect = child_rect;
         child.dirty = false;
         recurse(child, gap, border);
+    }
+}
+
+/// Adjust window_rect for border normal title bar space.
+/// Only applies if the child has border_style == .normal.
+fn adjustForBorderNormal(child: *tree.Container) void {
+    if (child.border_style != .normal) return;
+    if (child.type != .window) return;
+    const tbh: u32 = @intCast(render.tab_bar_height);
+    if (child.window_rect.h > tbh) {
+        child.window_rect.y += @intCast(tbh);
+        child.window_rect.h -= tbh;
     }
 }
 
