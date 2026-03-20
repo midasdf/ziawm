@@ -11,8 +11,18 @@ const criteria = @import("criteria.zig");
 const layout = @import("layout.zig");
 const render = @import("render.zig");
 const output = @import("output.zig");
+const ipc = @import("ipc.zig");
 
 pub const WindowMap = std.AutoHashMapUnmanaged(u32, *tree.Container);
+
+/// IPC event subscription bitmask
+pub const IPC_EVENT_WORKSPACE: u8 = 0x01;
+pub const IPC_EVENT_OUTPUT: u8 = 0x02;
+pub const IPC_EVENT_MODE: u8 = 0x04;
+pub const IPC_EVENT_WINDOW: u8 = 0x08;
+pub const IPC_EVENT_BINDING: u8 = 0x10;
+
+pub const MAX_IPC_SUBS: usize = 16;
 
 pub const EventContext = struct {
     conn: *xcb.Connection,
@@ -30,9 +40,47 @@ pub const EventContext = struct {
     randr_base_event: u8 = 0,
     /// O(1) window ID → container lookup. Updated on map/unmap/destroy.
     window_map: WindowMap = .{},
+    /// IPC subscription tracking: fd → event bitmask. -1 = unused slot.
+    ipc_sub_fds: *[MAX_IPC_SUBS]std.posix.fd_t = undefined,
+    ipc_sub_masks: *[MAX_IPC_SUBS]u8 = undefined,
+    /// Previous workspace name for back_and_forth
+    prev_workspace: [32]u8 = undefined,
+    prev_workspace_len: u8 = 0,
+    /// Drag state for floating window move/resize
+    drag_window: ?*tree.Container = null,
+    drag_button: u8 = 0, // 1=move, 3=resize
+    drag_start_x: i16 = 0,
+    drag_start_y: i16 = 0,
+    drag_orig_x: i32 = 0,
+    drag_orig_y: i32 = 0,
+    drag_orig_w: u32 = 0,
+    drag_orig_h: u32 = 0,
 };
 
 /// Dispatch an X11 event to the appropriate handler.
+/// Broadcast an IPC event to all subscribed clients.
+pub fn broadcastIpcEvent(ctx: *EventContext, event_type: ipc.EventType, payload: []const u8) void {
+    const mask_bit: u8 = switch (event_type) {
+        .workspace => IPC_EVENT_WORKSPACE,
+        .output => IPC_EVENT_OUTPUT,
+        .mode => IPC_EVENT_MODE,
+        .window => IPC_EVENT_WINDOW,
+        .binding => IPC_EVENT_BINDING,
+        else => return,
+    };
+
+    var send_buf: [4096 + ipc.HEADER_SIZE]u8 = undefined;
+    const msg = ipc.encodeEvent(event_type, payload, &send_buf);
+
+    for (0..MAX_IPC_SUBS) |i| {
+        if (ctx.ipc_sub_fds[i] != -1 and (ctx.ipc_sub_masks[i] & mask_bit) != 0) {
+            _ = std.posix.write(ctx.ipc_sub_fds[i], msg) catch {
+                // Client disconnected, will be cleaned up by main loop
+            };
+        }
+    }
+}
+
 pub fn handleEvent(ctx: *EventContext, event: *xcb.GenericEvent) void {
     const response_type = event.response_type & 0x7f; // mask out sent-event bit
 
@@ -46,6 +94,8 @@ pub fn handleEvent(ctx: *EventContext, event: *xcb.GenericEvent) void {
         xcb.PROPERTY_NOTIFY => handlePropertyNotify(ctx, @ptrCast(event)),
         xcb.CLIENT_MESSAGE => handleClientMessage(ctx, @ptrCast(event)),
         xcb.BUTTON_PRESS => handleButtonPress(ctx, @ptrCast(event)),
+        xcb.c.XCB_BUTTON_RELEASE => handleButtonRelease(ctx),
+        xcb.c.XCB_MOTION_NOTIFY => handleMotionNotify(ctx, @ptrCast(event)),
         xcb.FOCUS_IN => handleFocusIn(ctx, @ptrCast(event)),
         xcb.MAPPING_NOTIFY => handleMappingNotify(ctx, event),
         else => {
@@ -709,6 +759,9 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
 
     // Layout and render
     relayoutAndRender(ctx);
+
+    // Broadcast window new event
+    broadcastIpcEvent(ctx, .window, "{\"change\":\"new\"}");
 }
 
 fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
@@ -747,6 +800,7 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
 
     updateAllEwmh(ctx);
     relayoutAndRender(ctx);
+    broadcastIpcEvent(ctx, .window, "{\"change\":\"close\"}");
 }
 
 fn handleDestroyNotify(ctx: *EventContext, ev: *xcb.DestroyNotifyEvent) void {
@@ -823,12 +877,82 @@ fn handleEnterNotify(ctx: *EventContext, ev: *xcb.EnterNotifyEvent) void {
 }
 
 fn handleButtonPress(ctx: *EventContext, ev: *xcb.ButtonPressEvent) void {
-    const con = findContainerByWindow(ctx,ev.event) orelse return;
+    const con = findContainerByWindow(ctx, ev.event) orelse return;
     setFocus(ctx, con);
+
+    // Check for floating_modifier (Mod4) + button for drag move/resize
+    if (con.is_floating and (ev.state & xcb.MOD_MASK_4 != 0)) {
+        if (ev.detail == 1 or ev.detail == 3) {
+            // Start drag: Button1=move, Button3=resize
+            ctx.drag_window = con;
+            ctx.drag_button = ev.detail;
+            ctx.drag_start_x = ev.root_x;
+            ctx.drag_start_y = ev.root_y;
+            ctx.drag_orig_x = con.rect.x;
+            ctx.drag_orig_y = con.rect.y;
+            ctx.drag_orig_w = con.rect.w;
+            ctx.drag_orig_h = con.rect.h;
+
+            // Grab pointer for drag
+            _ = xcb.c.xcb_grab_pointer(
+                ctx.conn,
+                0,
+                ctx.root_window,
+                xcb.c.XCB_EVENT_MASK_BUTTON_RELEASE | xcb.c.XCB_EVENT_MASK_POINTER_MOTION,
+                xcb.c.XCB_GRAB_MODE_ASYNC,
+                xcb.c.XCB_GRAB_MODE_ASYNC,
+                xcb.c.XCB_WINDOW_NONE,
+                xcb.c.XCB_CURSOR_NONE,
+                xcb.c.XCB_CURRENT_TIME,
+            );
+            return;
+        }
+    }
 
     // Allow the click to pass through to the application
     _ = xcb.c.xcb_allow_events(ctx.conn, xcb.c.XCB_ALLOW_REPLAY_POINTER, xcb.CURRENT_TIME);
+}
 
+fn handleMotionNotify(ctx: *EventContext, ev: *xcb.c.xcb_motion_notify_event_t) void {
+    const con = ctx.drag_window orelse return;
+
+    const dx: i32 = @as(i32, ev.root_x) - @as(i32, ctx.drag_start_x);
+    const dy: i32 = @as(i32, ev.root_y) - @as(i32, ctx.drag_start_y);
+
+    if (ctx.drag_button == 1) {
+        // Move
+        con.rect.x = ctx.drag_orig_x + dx;
+        con.rect.y = ctx.drag_orig_y + dy;
+        con.window_rect = con.rect;
+    } else if (ctx.drag_button == 3) {
+        // Resize
+        const new_w = @as(i32, @intCast(ctx.drag_orig_w)) + dx;
+        const new_h = @as(i32, @intCast(ctx.drag_orig_h)) + dy;
+        con.rect.w = @intCast(@max(new_w, 50));
+        con.rect.h = @intCast(@max(new_h, 50));
+        con.window_rect = con.rect;
+    }
+
+    // Apply immediately for smooth dragging
+    if (con.window) |wd| {
+        const values = [_]u32{
+            @bitCast(con.rect.x),
+            @bitCast(con.rect.y),
+            con.rect.w,
+            con.rect.h,
+        };
+        const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+            xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
+        _ = xcb.configureWindow(ctx.conn, wd.id, mask, &values);
+    }
+}
+
+fn handleButtonRelease(ctx: *EventContext) void {
+    if (ctx.drag_window != null) {
+        ctx.drag_window = null;
+        ctx.drag_button = 0;
+        _ = xcb.c.xcb_ungrab_pointer(ctx.conn, xcb.c.XCB_CURRENT_TIME);
+    }
 }
 
 fn handleConfigureRequest(ctx: *EventContext, ev: *xcb.ConfigureRequestEvent) void {
@@ -1304,7 +1428,31 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
     if (ws) |target_ws| {
         // Unfocus current workspace
         if (getFocusedWorkspace(ctx.tree_root)) |current_ws| {
-            if (current_ws == target_ws) return; // already on this workspace
+            if (current_ws == target_ws) {
+                // Already on this workspace — check back_and_forth
+                if (ctx.config) |cfg| {
+                    if (cfg.workspace_auto_back_and_forth and ctx.prev_workspace_len > 0) {
+                        const prev_name = ctx.prev_workspace[0..ctx.prev_workspace_len];
+                        if (workspace.findByName(ctx.tree_root, prev_name)) |prev_ws| {
+                            clearFocusedPath(current_ws);
+                            setFocus(ctx, prev_ws);
+                            if (prev_ws.children.first) |child| {
+                                setFocus(ctx, getDeepestChild(child));
+                            }
+                            updateCurrentDesktop(ctx);
+                            relayoutAndRender(ctx);
+                            broadcastIpcEvent(ctx, .workspace, "{\"change\":\"focus\"}");
+                        }
+                    }
+                }
+                return;
+            }
+            // Save current workspace name for back_and_forth
+            if (current_ws.workspace) |wsd| {
+                const copy_len = @min(wsd.name.len, 32);
+                @memcpy(ctx.prev_workspace[0..copy_len], wsd.name[0..copy_len]);
+                ctx.prev_workspace_len = @intCast(copy_len);
+            }
             clearFocusedPath(current_ws);
         }
 
@@ -1319,6 +1467,12 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
         updateDesktopNames(ctx);
         updateNumberOfDesktops(ctx);
         relayoutAndRender(ctx);
+
+        // Broadcast workspace event
+        const ws_name = if (target_ws.workspace) |wsd| wsd.name else "?";
+        var ev_buf: [256]u8 = undefined;
+        const ev_json = std.fmt.bufPrint(&ev_buf, "{{\"change\":\"focus\",\"current\":{{\"name\":\"{s}\"}}}}", .{ws_name}) catch "";
+        if (ev_json.len > 0) broadcastIpcEvent(ctx, .workspace, ev_json);
     }
 }
 
@@ -1685,6 +1839,11 @@ fn executeMode(ctx: *EventContext, cmd: command_mod.Command) void {
     }
     ctx.current_mode = duped;
     std.debug.print("zephwm: switched to mode \"{s}\"\n", .{duped});
+
+    // Broadcast mode event
+    var ev_buf: [128]u8 = undefined;
+    const ev_json = std.fmt.bufPrint(&ev_buf, "{{\"change\":\"{s}\"}}", .{duped}) catch "";
+    if (ev_json.len > 0) broadcastIpcEvent(ctx, .mode, ev_json);
 }
 
 // --- Key grabbing ---

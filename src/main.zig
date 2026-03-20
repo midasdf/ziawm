@@ -38,6 +38,38 @@ const IPC_LISTEN_FD_TAG: i32 = -100; // sentinel for epoll data.fd
 const SIGNAL_FD_TAG: i32 = -200; // sentinel for signalfd in epoll
 const MAX_IPC_CLIENTS: usize = 16;
 
+fn registerSubscription(
+    client_fd: std.posix.fd_t,
+    payload: []const u8,
+    sub_fds: *[event.MAX_IPC_SUBS]std.posix.fd_t,
+    sub_masks: *[event.MAX_IPC_SUBS]u8,
+) void {
+    // Parse JSON array of event names: ["workspace","mode","window"]
+    var mask: u8 = 0;
+    if (std.mem.indexOf(u8, payload, "\"workspace\"") != null) mask |= event.IPC_EVENT_WORKSPACE;
+    if (std.mem.indexOf(u8, payload, "\"output\"") != null) mask |= event.IPC_EVENT_OUTPUT;
+    if (std.mem.indexOf(u8, payload, "\"mode\"") != null) mask |= event.IPC_EVENT_MODE;
+    if (std.mem.indexOf(u8, payload, "\"window\"") != null) mask |= event.IPC_EVENT_WINDOW;
+    if (std.mem.indexOf(u8, payload, "\"binding\"") != null) mask |= event.IPC_EVENT_BINDING;
+
+    if (mask == 0) return;
+
+    // Find existing slot or empty slot
+    for (0..event.MAX_IPC_SUBS) |i| {
+        if (sub_fds[i] == client_fd) {
+            sub_masks[i] |= mask; // Add to existing subscription
+            return;
+        }
+    }
+    for (0..event.MAX_IPC_SUBS) |i| {
+        if (sub_fds[i] == -1) {
+            sub_fds[i] = client_fd;
+            sub_masks[i] = mask;
+            return;
+        }
+    }
+}
+
 fn handleIpcMessage(ctx: *event.EventContext, client_fd: std.posix.fd_t, msg_type: u32, payload: []const u8) void {
     // For dynamic responses, use stack buffer
     var dyn_buf: [8192]u8 = undefined;
@@ -59,10 +91,14 @@ fn handleIpcMessage(ctx: *event.EventContext, client_fd: std.posix.fd_t, msg_typ
         @intFromEnum(ipc.MessageType.get_outputs) => buildOutputsJson(ctx, &dyn_buf),
         @intFromEnum(ipc.MessageType.get_tree) => buildTreeJson(ctx, &dyn_buf),
         @intFromEnum(ipc.MessageType.get_marks) => buildMarksJson(ctx, &dyn_buf),
-        @intFromEnum(ipc.MessageType.get_bar_config) => "{}",
+        @intFromEnum(ipc.MessageType.get_bar_config) => buildBarConfigJson(ctx, &dyn_buf),
         @intFromEnum(ipc.MessageType.get_config) => "{}",
         @intFromEnum(ipc.MessageType.get_binding_modes) => "[\"default\"]",
-        @intFromEnum(ipc.MessageType.subscribe) => "{\"success\":true}",
+        @intFromEnum(ipc.MessageType.subscribe) => blk: {
+            // Parse subscription payload and register client
+            registerSubscription(client_fd, payload, ctx.ipc_sub_fds, ctx.ipc_sub_masks);
+            break :blk "{\"success\":true}";
+        },
         @intFromEnum(ipc.MessageType.send_tick) => "{\"success\":true}",
         else => "{}",
     };
@@ -198,6 +234,21 @@ fn buildOutputsJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
 
 /// Build JSON for GET_MARKS response.
 /// Walks the entire tree collecting all marks from all containers.
+fn buildBarConfigJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
+    const cfg = ctx.config orelse return "{}";
+    var fbs = std.io.fixedBufferStream(buf);
+    const w = fbs.writer();
+    std.fmt.format(w, "{{\"id\":\"bar-0\",\"mode\":\"dock\",\"position\":\"{s}\",\"status_command\":\"{s}\",\"bar_height\":20,\"colors\":{{\"background\":\"{s}\",\"statusline\":\"{s}\",\"focused_workspace_bg\":\"{s}\",\"focused_workspace_text\":\"{s}\"}}}}", .{
+        cfg.bar.position,
+        cfg.bar.status_command,
+        cfg.bar.bg_color,
+        cfg.bar.statusline_color,
+        cfg.focused_bg,
+        cfg.focused_text,
+    }) catch return "{}";
+    return fbs.getWritten();
+}
+
 fn buildMarksJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
     var fbs = std.io.fixedBufferStream(buf);
     const w = fbs.writer();
@@ -540,6 +591,10 @@ pub fn main() !void {
     // IPC client fd tracking
     var ipc_client_fds: [MAX_IPC_CLIENTS]std.posix.fd_t = .{-1} ** MAX_IPC_CLIENTS;
 
+    // IPC subscription tracking
+    var ipc_sub_fds: [event.MAX_IPC_SUBS]std.posix.fd_t = .{-1} ** event.MAX_IPC_SUBS;
+    var ipc_sub_masks: [event.MAX_IPC_SUBS]u8 = .{0} ** event.MAX_IPC_SUBS;
+
     std.debug.print("zephwm v{s} started (screen {}x{}, ipc: {s})\n", .{
         VERSION,
         screen.width_in_pixels,
@@ -626,6 +681,8 @@ pub fn main() !void {
         .border_focus_color = border_focus_color,
         .border_unfocus_color = border_unfocus_color,
         .randr_base_event = randr_base_event,
+        .ipc_sub_fds = &ipc_sub_fds,
+        .ipc_sub_masks = &ipc_sub_masks,
     };
 
     // 10. Grab keys from config
@@ -730,6 +787,13 @@ pub fn main() !void {
                             } else {
                                 // Client disconnected (EOF)
                                 _ = linux.epoll_ctl(@intCast(epoll_fd), linux.EPOLL.CTL_DEL, @intCast(ev.data.fd), null);
+                                // Clean up any IPC subscriptions for this fd
+                                for (0..event.MAX_IPC_SUBS) |si| {
+                                    if (ipc_sub_fds[si] == ev.data.fd) {
+                                        ipc_sub_fds[si] = -1;
+                                        ipc_sub_masks[si] = 0;
+                                    }
+                                }
                                 std.posix.close(ev.data.fd);
                                 slot.* = -1;
                                 break;

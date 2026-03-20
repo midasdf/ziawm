@@ -55,6 +55,7 @@ pub const Config = struct {
     gap_outer: u32 = 0,
     focus_follows_mouse: bool = true,
     focus_wrapping: bool = true,
+    workspace_auto_back_and_forth: bool = false,
     // Colors (owned = heap-allocated, must free on deinit)
     focused_border: []const u8 = "#4c7899",
     focused_bg: []const u8 = "#285577",
@@ -254,6 +255,13 @@ pub const Config = struct {
             if (std.mem.startsWith(u8, line, "focus_wrapping ")) {
                 const val = std.mem.trim(u8, line["focus_wrapping ".len..], " \t");
                 cfg.focus_wrapping = std.mem.eql(u8, val, "yes");
+                continue;
+            }
+
+            // workspace_auto_back_and_forth yes/no
+            if (std.mem.startsWith(u8, line, "workspace_auto_back_and_forth ")) {
+                const val = std.mem.trim(u8, line["workspace_auto_back_and_forth ".len..], " \t");
+                cfg.workspace_auto_back_and_forth = std.mem.eql(u8, val, "yes");
                 continue;
             }
 
