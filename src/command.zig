@@ -153,6 +153,11 @@ pub fn parse(input: []const u8) ?Command {
             const num_str = trimLeft(rest["pixel ".len..]);
             return Command{ .type = .border, .args = .{ "pixel", num_str, null, null }, .criteria = crit };
         }
+        // Check for "normal N" pattern
+        if (startsWith(u8, rest, "normal ")) {
+            const num_str = trimLeft(rest["normal ".len..]);
+            return Command{ .type = .border, .args = .{ "normal", num_str, null, null }, .criteria = crit };
+        }
         return Command{ .type = .border, .args = .{ rest, null, null, null }, .criteria = crit };
     }
 

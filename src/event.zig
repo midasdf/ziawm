@@ -689,6 +689,7 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     const border_w: u16 = if (ctx.config) |cfg| @intCast(cfg.border_px) else 2;
     {
         const frame_values = [_]u32{
+            xcb.c.XCB_NONE, // XCB_CW_BACK_PIXMAP = None (prevent X server from painting background on resize)
             xcb.c.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
                 xcb.c.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
                 xcb.c.XCB_EVENT_MASK_EXPOSURE |
@@ -703,7 +704,7 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
             border_w,
             xcb.c.XCB_WINDOW_CLASS_INPUT_OUTPUT,
             xcb.c.XCB_COPY_FROM_PARENT,
-            xcb.c.XCB_CW_EVENT_MASK,
+            xcb.c.XCB_CW_BACK_PIXMAP | xcb.c.XCB_CW_EVENT_MASK,
             &frame_values,
         );
     }

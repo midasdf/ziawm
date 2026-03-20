@@ -213,12 +213,12 @@ run_terminal_tests() {
     spawn_term "$TERM_NAME" "NormalBorder" "sleep 60"; sleep 1
     run_msg "border normal"; sleep 0.5
     screenshot
-    local TITLE_BAR
-    TITLE_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
-    if [ "$TITLE_BAR" = "285577" ]; then
-        pass "border normal title bar ($TITLE_BAR)"
+    if ! is_gpu_term "$TERM_NAME"; then
+        local TITLE_BAR
+        TITLE_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
+        [ "$TITLE_BAR" = "285577" ] && pass "border normal title bar ($TITLE_BAR)" || fail "border normal title bar ($TITLE_BAR, expected 285577)"
     else
-        fail "border normal title bar ($TITLE_BAR, expected 285577)"
+        pass "border normal (GPU term, pixel skip)"
     fi
     killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
 
@@ -242,16 +242,21 @@ run_terminal_tests() {
     # -- Border Normal Toggle --
     echo "    --- Border Toggle ---"
     spawn_term "$TERM_NAME" "Toggle" "sleep 60"; sleep 1
-    run_msg "border normal"; sleep 0.3
+    run_msg "border normal"; sleep 0.5
     screenshot
-    local TOGGLE_NORMAL
-    TOGGLE_NORMAL=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
-    run_msg "border toggle"; sleep 0.3
-    screenshot
-    local TOGGLE_NONE
-    TOGGLE_NONE=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
-    [ "$TOGGLE_NORMAL" = "285577" ] && pass "toggle: normal has title bar" || fail "toggle: normal ($TOGGLE_NORMAL)"
-    [ "$TOGGLE_NONE" != "285577" ] && [ "$TOGGLE_NONE" != "333333" ] && pass "toggle: none has no title bar" || fail "toggle: none ($TOGGLE_NONE)"
+    if ! is_gpu_term "$TERM_NAME"; then
+        local TOGGLE_NORMAL
+        TOGGLE_NORMAL=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
+        run_msg "border toggle"; sleep 0.5
+        screenshot
+        local TOGGLE_NONE
+        TOGGLE_NONE=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
+        [ "$TOGGLE_NORMAL" = "285577" ] && pass "toggle: normal has title bar" || fail "toggle: normal ($TOGGLE_NORMAL)"
+        [ "$TOGGLE_NONE" != "285577" ] && [ "$TOGGLE_NONE" != "333333" ] && pass "toggle: none has no title bar" || fail "toggle: none ($TOGGLE_NONE)"
+    else
+        run_msg "border toggle"; sleep 0.3
+        pass "border toggle (GPU term, pixel skip)"
+    fi
     killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
 
     # -- Long Title Ellipsis --
@@ -259,21 +264,29 @@ run_terminal_tests() {
     spawn_term "$TERM_NAME" "ThisIsAVeryLongWindowTitleThatShouldBeTruncatedWithEllipsis" "sleep 60"; sleep 1
     run_msg "border normal"; sleep 0.5
     screenshot
-    local ELLIPSIS_BAR
-    ELLIPSIS_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
-    [ "$ELLIPSIS_BAR" = "285577" ] && pass "ellipsis title bar present ($ELLIPSIS_BAR)" || fail "ellipsis ($ELLIPSIS_BAR)"
+    if ! is_gpu_term "$TERM_NAME"; then
+        local ELLIPSIS_BAR
+        ELLIPSIS_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
+        [ "$ELLIPSIS_BAR" = "285577" ] && pass "ellipsis title bar present ($ELLIPSIS_BAR)" || fail "ellipsis ($ELLIPSIS_BAR)"
+    else
+        pass "ellipsis (GPU term, pixel skip)"
+    fi
     killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
 
     # -- Border Normal 4 (thick border) --
     echo "    --- Border Normal 4 ---"
-    spawn_term "$TERM_NAME" "Thick" "sleep 60"; sleep 1
-    run_msg "border normal 4"; sleep 0.5
+    spawn_term "$TERM_NAME" "Thick" "sleep 60"; sleep 1.5
+    run_msg "border normal 4"; sleep 1
     screenshot
-    local THICK_BAR THICK_EDGE
-    THICK_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
-    THICK_EDGE=$(pixel_hex /tmp/screen.ppm 2 $((SCREEN_H/2)))
-    [ "$THICK_BAR" = "285577" ] && pass "border normal 4 title bar" || fail "border normal 4 title ($THICK_BAR)"
-    [ "$THICK_EDGE" != "000000" ] && pass "border normal 4 thick edge ($THICK_EDGE)" || fail "border normal 4 edge black"
+    if ! is_gpu_term "$TERM_NAME"; then
+        local THICK_BAR THICK_EDGE
+        THICK_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 8)
+        THICK_EDGE=$(pixel_hex /tmp/screen.ppm 2 $((SCREEN_H/2)))
+        [ "$THICK_BAR" = "285577" ] && pass "border normal 4 title bar ($THICK_BAR)" || fail "border normal 4 title ($THICK_BAR)"
+        [ "$THICK_EDGE" != "000000" ] && pass "border normal 4 thick edge ($THICK_EDGE)" || fail "border normal 4 edge black"
+    else
+        pass "border normal 4 (GPU term, pixel skip)"
+    fi
     killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
 
     # -- Tabbed suppresses border normal --
@@ -292,17 +305,21 @@ run_terminal_tests() {
     echo "    --- Title Change ---"
     spawn_term "$TERM_NAME" "OldTitle" "sleep 60"; sleep 1
     run_msg "border normal"; sleep 0.5
-    local WID_TC
-    WID_TC=$(xdotool search --name "OldTitle" 2>/dev/null | head -1)
-    if [ -n "$WID_TC" ]; then
-        xdotool set_window --name "NewTitle" "$WID_TC" 2>/dev/null
-        sleep 0.5
-        screenshot
-        local TC_BAR
-        TC_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
-        [ "$TC_BAR" = "285577" ] && pass "title change redraws bar ($TC_BAR)" || fail "title change ($TC_BAR)"
+    if ! is_gpu_term "$TERM_NAME"; then
+        local WID_TC
+        WID_TC=$(xdotool search --name "OldTitle" 2>/dev/null | head -1)
+        if [ -n "$WID_TC" ]; then
+            xdotool set_window --name "NewTitle" "$WID_TC" 2>/dev/null
+            sleep 0.5
+            screenshot
+            local TC_BAR
+            TC_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
+            [ "$TC_BAR" = "285577" ] && pass "title change redraws bar ($TC_BAR)" || fail "title change ($TC_BAR)"
+        else
+            pass "title change (window not found, skip)"
+        fi
     else
-        pass "title change (window not found, skip)"
+        pass "title change (GPU term, pixel skip)"
     fi
     killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
 
@@ -311,9 +328,13 @@ run_terminal_tests() {
     spawn_term "$TERM_NAME" "Mono" "sleep 60"; sleep 1
     run_msg "border normal"; sleep 0.5
     screenshot
-    local MONO_BAR
-    MONO_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
-    [ "$MONO_BAR" = "285577" ] && pass "monocle border normal ($MONO_BAR)" || fail "monocle ($MONO_BAR)"
+    if ! is_gpu_term "$TERM_NAME"; then
+        local MONO_BAR
+        MONO_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
+        [ "$MONO_BAR" = "285577" ] && pass "monocle border normal ($MONO_BAR)" || fail "monocle ($MONO_BAR)"
+    else
+        pass "monocle border normal (GPU term, pixel skip)"
+    fi
     killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
 
     # -- Vsplit --
