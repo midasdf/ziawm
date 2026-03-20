@@ -364,7 +364,8 @@ fn relayoutAndRender(ctx: *EventContext) void {
             }
     }
 
-    render.applyTree(ctx.conn, ctx.tree_root, ctx.border_focus_color, ctx.border_unfocus_color, ctx.root_window);
+    const default_border: u16 = if (ctx.config) |c| @intCast(c.border_px) else 1;
+    render.applyTree(ctx.conn, ctx.tree_root, ctx.border_focus_color, ctx.border_unfocus_color, ctx.root_window, default_border);
 }
 
 // --- EWMH property update helpers ---

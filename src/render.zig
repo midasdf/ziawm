@@ -174,13 +174,18 @@ pub fn ensureTitleGc(conn: *xcb.Connection, root_window: xcb.Window) void {
         &gc_values);
 }
 
+/// Default border width from config, set by applyTree for use in applyWindow.
+var config_border_px: u16 = 1;
+
 pub fn applyTree(
     conn: *xcb.Connection,
     root: *tree.Container,
     border_focus_color: u32,
     border_unfocus_color: u32,
     root_window: xcb.Window,
+    default_border: u16,
 ) void {
+    config_border_px = default_border;
     ensureTitleGc(conn, root_window);
     // Iterate over outputs
     var out_cur = root.children.first;
@@ -327,7 +332,7 @@ fn applyWindow(
         const effective_border: u16 = blk: {
             if (con.border_style == .none) break :blk 0;
             if (con.border_width_override >= 0) break :blk @intCast(con.border_width_override);
-            break :blk 2; // fallback default
+            break :blk config_border_px;
         };
         const values = [_]u32{
             @bitCast(r.x),
