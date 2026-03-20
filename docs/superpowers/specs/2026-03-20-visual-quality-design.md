@@ -27,7 +27,7 @@ Title bar rendering hardcodes `"fixed"` font with no error handling. No font met
 "cursor"
 ```
 
-`"cursor"` is guaranteed to exist on any X server.
+`"cursor"` is guaranteed to exist on any X server but is a cursor glyph font — text rendered with it will be unusable. It serves only as a crash-prevention last resort.
 
 **Metrics acquisition** via `xcb_query_font`:
 
@@ -54,6 +54,7 @@ Title bar rendering hardcodes `"fixed"` font with no error handling. No font met
 - All fonts in the fallback list are XCB core fonts (not Xft/TrueType)
 - `xcb_query_text_extents` available for per-string width if needed, but `max_bounds.character_width` is sufficient for fixed-width fonts
 - Font is loaded once at first use (lazy init pattern preserved)
+- Font fallback test: integration test in Xephyr (mocking xcb C calls in Zig is impractical)
 
 ## 2. Frame Windows (Reparenting)
 
@@ -125,11 +126,13 @@ Where:
 - `inner_w = frame_w` (border handled by X11)
 - `inner_h = frame_h - y_offset`
 
-Map/unmap operates on the **frame**, not the client. Client stays mapped inside its frame.
+Map/unmap operates on the **frame** (`frame_id`), not the client. Client stays mapped inside its frame. All existing `mapSubtree`/`unmapSubtree` calls in render.zig must use `frame_id` instead of `win_data.id`.
+
+After reparenting, `Container.rect` represents the frame's geometry and `Container.window_rect` represents the client's position within the frame (offset by border and title bar).
 
 **Tabbed/Stacked Title Bars:**
 
-Drawn on the **focused child's frame window**, in the area above the client:
+In tabbed/stacked layouts, only the **focused child's frame** is mapped; all other children's frames are unmapped. All sibling tab/stack labels are drawn on the focused child's frame window, in the area above the client:
 
 ```
 frame window (total height = tab_bar_height + client_height)
@@ -163,16 +166,20 @@ When a frame receives an Expose event, look up the Container and redraw its titl
 
 Current logic: check `pending_unmap` counter, `mapped` state, and `ev.event == ev.window`.
 
-With frames: `ev.event` will be the frame ID (since client is child of frame). Adjust the check:
-- `ev.event == container.window.frame_id` AND `ev.window == container.window.id`
-- Decrement `pending_unmap` if > 0, skip handling
+With frames, two sources of UnmapNotify:
+
+1. **Synthetic from reparent**: `ev.event == root_window`, `ev.window == client_id`. This is absorbed by the `pending_unmap` counter (incremented before `xcb_reparent_window`).
+2. **Client-initiated unmap**: `ev.event == frame_id` (frame is now parent), `ev.window == client_id`. Since `ev.event != ev.window`, the existing `ev.event == ev.window` guard won't filter it — this is correct and desired.
+
+Container lookup: `findContainerByWindow(ev.window)` finds the container via client ID (both client and frame IDs are in window_map). After lookup:
+- If `pending_unmap > 0`: decrement, skip
 - Otherwise: client requested unmap → destroy frame, remove container
 
 **DestroyNotify (event.zig):**
 
 Client destroyed → `xcb_destroy_window(frame)`, remove both IDs from window_map.
 
-**WM Shutdown / Restart (main.zig):**
+**WM Shutdown / Restart:**
 
 ICCCM requires reparenting clients back to root before WM exits:
 
@@ -184,7 +191,11 @@ for (all_containers) |con| {
 }
 ```
 
-For restart (re-exec): same unreparent, then exec. New instance will re-reparent on MapRequest or by scanning existing windows.
+This unreparent loop is needed in **two places**:
+- `main.zig`: shutdown/cleanup path
+- `event.zig`: `executeRestart()` — currently calls `execvp` directly, must unreparent before exec
+
+For restart: unreparent all → exec. New instance re-reparents on MapRequest or by scanning existing windows.
 
 **Focus:**
 
@@ -195,10 +206,10 @@ For restart (re-exec): same unreparent, then exec. New instance will re-reparent
 | File | Change | Scale |
 |------|--------|-------|
 | tree.zig | `frame_id` field in WindowData | Small |
-| event.zig | MapRequest: create frame + reparent. UnmapNotify/DestroyNotify: frame cleanup. New Expose handler | Large |
-| render.zig | Configure frame + client separately. Title bar drawn on frame. Expose-triggered redraw | Large |
+| event.zig | MapRequest: create frame + reparent. UnmapNotify/DestroyNotify: frame cleanup. New Expose handler. `executeRestart`: unreparent before exec | Large |
+| render.zig | Configure frame + client separately. Title bar drawn on frame. map/unmap uses frame_id. Expose-triggered redraw | Large |
 | layout.zig | tabbed/stacked account for title bar in frame height | Small |
-| main.zig | Shutdown/restart: unreparent all clients. window_map stores frame_id too | Medium |
+| main.zig | Shutdown: unreparent all clients. window_map stores frame_id too | Medium |
 | xcb.zig | Add wrappers: `reparent_window`, `create_window` if missing | Small |
 
 ### Risks & Mitigations
@@ -223,9 +234,9 @@ zephwm-bar remains a single process but creates one X window per output.
 
 #### IPC Extension
 
-**New: `GET_OUTPUTS` message type** (or extend existing IPC):
+`GET_OUTPUTS` already exists in main.zig (`buildOutputsJson`) with name, geometry, and current workspace. Extend the existing response to ensure it includes all fields needed by the bar:
 
-Response:
+Response format (existing + extensions):
 ```json
 {
   "outputs": [
@@ -293,8 +304,8 @@ bars: ArrayList(BarWindow)   // one per active output
 
 | File | Change | Scale |
 |------|--------|-------|
-| ipc.zig | `GET_OUTPUTS` handler, output field in workspace events | Medium |
-| output.zig | Export output list for IPC consumption | Small |
+| ipc.zig | Output field in workspace events | Medium |
+| main.zig | Extend existing `buildOutputsJson` if needed | Small |
 | src/bar.zig (WM side) | No change (bar spawning stays the same) | None |
 | zephwm-bar (separate binary) | Multi-window, IPC GET_OUTPUTS, output event handling | Large |
 
@@ -320,7 +331,7 @@ bars: ArrayList(BarWindow)   // one per active output
 10. New integration tests for reparent behavior
 
 ### Phase C: Per-Output Bar
-1. `GET_OUTPUTS` IPC message in zephwm
+1. Extend existing `GET_OUTPUTS` response if needed
 2. Output field in workspace IPC events
 3. zephwm-bar: multi-window creation from output list
 4. Per-output workspace button filtering
@@ -332,7 +343,7 @@ bars: ArrayList(BarWindow)   // one per active output
 
 | Area | Method |
 |------|--------|
-| Font fallback | Unit test: mock xcb_open_font failure, verify fallback progression |
+| Font fallback | Integration test (Xephyr): verify font loads successfully with fallback |
 | Font metrics | Unit test: verify tab_bar_height calculation from known metrics |
 | Frame create/destroy | Integration test (Xephyr): map window, verify frame exists as parent |
 | Reparent on unmap | Integration test: unmap client, verify frame destroyed |
