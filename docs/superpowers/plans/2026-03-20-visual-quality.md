@@ -80,8 +80,8 @@ fn ensureTitleGc(conn: *xcb.Connection, root_window: xcb.Window) void {
     // Query font metrics
     const qf_cookie = xcb.c.xcb_query_font(conn, title_font);
     if (xcb.c.xcb_query_font_reply(conn, qf_cookie, null)) |reply| {
-        font_ascent = reply.*.font_ascent;
-        font_descent = reply.*.font_descent;
+        font_ascent = @intCast(reply.*.font_ascent);
+        font_descent = @intCast(reply.*.font_descent);
         font_char_width = if (reply.*.max_bounds.character_width > 0)
             @intCast(reply.*.max_bounds.character_width)
         else
@@ -955,8 +955,10 @@ if (con) |c| {
     if (c.window) |wd| {
         if (wd.frame_id != 0) {
             _ = xcb.configureWindow(ctx.conn, wd.frame_id, mask, &values);
-            // Client fills frame at (0,0)
-            const client_values = [_]u32{ 0, 0, @bitCast(ev.width), @bitCast(ev.height) };
+            // Client fills frame at (0,0) — use requested size if present, else current rect
+            const cw: u32 = if (ev.value_mask & xcb.CONFIG_WINDOW_WIDTH != 0) @as(u32, ev.width) else c.rect.w;
+            const ch: u32 = if (ev.value_mask & xcb.CONFIG_WINDOW_HEIGHT != 0) @as(u32, ev.height) else c.rect.h;
+            const client_values = [_]u32{ 0, 0, cw, ch };
             const client_mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
                 xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
             _ = xcb.configureWindow(ctx.conn, wd.id, client_mask, &client_values);
