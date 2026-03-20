@@ -15,6 +15,7 @@ pub const Rect = struct {
 
 pub const WindowData = struct {
     id: u32,
+    frame_id: u32 = 0,
     class: []const u8 = "",
     instance: []const u8 = "",
     title: []const u8 = "",

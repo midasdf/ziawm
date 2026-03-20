@@ -155,9 +155,21 @@ fn buildWorkspacesJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
 
             std.fmt.format(w, "{{\"num\":{d},\"name\":\"", .{num}) catch return "[]";
             jsonEscapeWrite(w, name) catch return "[]";
-            std.fmt.format(w, "\",\"visible\":{},\"focused\":{},\"output\":\"default\",\"urgent\":{},\"rect\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}}}}", .{
-                visible,
-                focused,
+            // Get output name from parent output container
+            const ws_output_name = blk: {
+                if (ws.parent) |parent| {
+                    if (parent.type == .output) {
+                        if (parent.workspace) |parent_wsd| {
+                            if (parent_wsd.output_name.len > 0) break :blk parent_wsd.output_name;
+                        }
+                    }
+                }
+                break :blk "default";
+            };
+            w.writeAll("\",\"visible\":") catch return "[]";
+            std.fmt.format(w, "{},\"focused\":{},\"output\":\"", .{ visible, focused }) catch return "[]";
+            jsonEscapeWrite(w, ws_output_name) catch return "[]";
+            std.fmt.format(w, "\",\"urgent\":{},\"rect\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}}}}", .{
                 urgent,
                 ws.rect.x,
                 ws.rect.y,
@@ -724,7 +736,10 @@ pub fn main() !void {
         }
     }
 
-    // 11b. Set initial EWMH properties
+    // 11b. Initialize font/title GC early so tab_bar_height is correct from first layout
+    render.ensureTitleGc(conn, root_window);
+
+    // 11c. Set initial EWMH properties
     event.updateClientList(&ctx);
     event.updateNumberOfDesktops(&ctx);
     event.updateCurrentDesktop(&ctx);
@@ -844,7 +859,7 @@ pub fn main() !void {
                         },
                         linux.SIG.HUP => {
                             // Restart via re-exec (same as "restart" command)
-                            event.executeRestart();
+                            event.executeRestart(&ctx);
                             // If re-exec failed, just exit
                             running = false;
                         },
@@ -871,6 +886,9 @@ pub fn main() !void {
             }
         }
     }
+
+    // Unreparent all client windows back to root (ICCCM)
+    event.unreparentAll(&ctx);
 
     // Cleanup IPC clients
     for (&ipc_client_fds) |*slot| {

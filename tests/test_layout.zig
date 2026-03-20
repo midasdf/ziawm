@@ -185,7 +185,7 @@ test "tabbed layout: all children same rect with 16px tab offset" {
     }
 }
 
-test "border reduces window_rect" {
+test "window_rect equals rect (borders handled by frame window)" {
     const alloc = std.testing.allocator;
     const ws = try makeWs(alloc, 720, 720);
     defer ws.destroy(alloc);
@@ -195,14 +195,14 @@ test "border reduces window_rect" {
 
     layout.apply(ws, 0, 2);
 
-    // rect is full 720x720, window_rect is 4px smaller on each axis
+    // rect is full 720x720; window_rect equals rect — borders are on the frame, not shrunk here
     try std.testing.expectEqual(@as(u32, 720), child.rect.w);
     try std.testing.expectEqual(@as(u32, 720), child.rect.h);
 
-    try std.testing.expectEqual(@as(i32, 2), child.window_rect.x);
-    try std.testing.expectEqual(@as(i32, 2), child.window_rect.y);
-    try std.testing.expectEqual(@as(u32, 716), child.window_rect.w);
-    try std.testing.expectEqual(@as(u32, 716), child.window_rect.h);
+    try std.testing.expectEqual(@as(i32, 0), child.window_rect.x);
+    try std.testing.expectEqual(@as(i32, 0), child.window_rect.y);
+    try std.testing.expectEqual(@as(u32, 720), child.window_rect.w);
+    try std.testing.expectEqual(@as(u32, 720), child.window_rect.h);
 }
 
 test "floating children excluded from tiling" {

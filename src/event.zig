@@ -71,6 +71,18 @@ fn jsonEscapeWrite(w: anytype, s: []const u8) !void {
     }
 }
 
+/// Get the output name for a workspace container.
+fn getWorkspaceOutputName(ws: *tree.Container) []const u8 {
+    if (ws.parent) |parent| {
+        if (parent.type == .output) {
+            if (parent.workspace) |wsd| {
+                if (wsd.output_name.len > 0) return wsd.output_name;
+            }
+        }
+    }
+    return "default";
+}
+
 /// Broadcast an IPC event to all subscribed clients.
 pub fn broadcastIpcEvent(ctx: *EventContext, event_type: ipc.EventType, payload: []const u8) void {
     const mask_bit: u8 = switch (event_type) {
@@ -109,6 +121,7 @@ pub fn handleEvent(ctx: *EventContext, event: *xcb.GenericEvent) void {
         xcb.BUTTON_PRESS => handleButtonPress(ctx, @ptrCast(event)),
         xcb.c.XCB_BUTTON_RELEASE => handleButtonRelease(ctx),
         xcb.c.XCB_MOTION_NOTIFY => handleMotionNotify(ctx, @ptrCast(event)),
+        xcb.c.XCB_EXPOSE => handleExpose(ctx, @ptrCast(@alignCast(event))),
         xcb.FOCUS_IN => handleFocusIn(ctx, @ptrCast(event)),
         xcb.MAPPING_NOTIFY => handleMappingNotify(ctx, event),
         else => {
@@ -363,6 +376,9 @@ pub fn updateClientList(ctx: *EventContext) void {
     var iter = ctx.window_map.iterator();
     while (iter.next()) |entry| {
         if (count >= 1024) break;
+        const con = entry.value_ptr.*;
+        const wd = con.window orelse continue;
+        if (entry.key_ptr.* != wd.id) continue; // skip frame_id entries
         ids[count] = entry.key_ptr.*;
         count += 1;
     }
@@ -662,19 +678,52 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
         should_float = shouldFloatByType(ctx.conn, window, ctx.atoms);
     }
 
+    // Create frame window
+    const frame_id = xcb.generateId(ctx.conn);
+    const border_w: u16 = if (ctx.config) |cfg| @intCast(cfg.border_px) else 2;
+    {
+        const frame_values = [_]u32{
+            xcb.c.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
+                xcb.c.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
+                xcb.c.XCB_EVENT_MASK_EXPOSURE |
+                xcb.c.XCB_EVENT_MASK_ENTER_WINDOW,
+        };
+        _ = xcb.c.xcb_create_window(
+            ctx.conn,
+            xcb.c.XCB_COPY_FROM_PARENT,
+            frame_id,
+            ctx.root_window,
+            0, 0, 1, 1,
+            border_w,
+            xcb.c.XCB_WINDOW_CLASS_INPUT_OUTPUT,
+            xcb.c.XCB_COPY_FROM_PARENT,
+            xcb.c.XCB_CW_EVENT_MASK,
+            &frame_values,
+        );
+    }
+
+    // Add client to save-set for crash recovery (ICCCM requirement)
+    _ = xcb.c.xcb_change_save_set(ctx.conn, xcb.c.XCB_SET_MODE_INSERT, window);
+
+    // Reparent client window into frame
+    _ = xcb.c.xcb_reparent_window(ctx.conn, window, frame_id, 0, 0);
+
     con.window = tree.WindowData{
         .id = window,
+        .frame_id = frame_id,
         .class = wm_class.class,
         .instance = wm_class.instance,
         .title = title,
         .window_type = win_type,
         .window_role = win_role,
         .transient_for = transient,
+        .pending_unmap = 1, // absorb synthetic UnmapNotify from reparent
     };
     con.is_floating = should_float;
 
-    // Register in window lookup map
+    // Register both client and frame in window lookup map
     registerWindow(ctx, window, con);
+    registerWindow(ctx, frame_id, con);
 
     // Determine target workspace
     var target_ws = getFocusedWorkspace(ctx.tree_root);
@@ -749,7 +798,8 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
         xcb.MOD_MASK_ANY,
     );
 
-    // Map the window
+    // Map the frame and client window
+    _ = xcb.mapWindow(ctx.conn, frame_id);
     _ = xcb.mapWindow(ctx.conn, window);
 
     // Check for_window rules from config
@@ -778,26 +828,25 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
 }
 
 fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
-    // Only process SubstructureNotify events (from root window).
-    // Skip StructureNotify events (from the window itself) to avoid double-processing.
-    // When ev.event == ev.window, it's StructureNotify on the window itself.
     if (ev.event == ev.window) return;
 
-    const con = findContainerByWindow(ctx,ev.window) orelse return;
+    const con = findContainerByWindow(ctx, ev.window) orelse return;
+    const wd = con.window orelse return;
+    if (ev.window == wd.frame_id) return; // ignore frame unmap events
 
-    // Check if this unmap was WM-initiated (e.g. hiding windows in tabbed/stacked mode
-    // or switching workspaces). If so, decrement counter and ignore.
-    if (con.window) |*wd| {
-        if (wd.pending_unmap > 0) {
-            wd.pending_unmap -= 1;
+    if (con.window) |*wd_ptr| {
+        if (wd_ptr.pending_unmap > 0) {
+            wd_ptr.pending_unmap -= 1;
             return;
         }
     }
 
-    // Client-initiated unmap — remove the window from the tree
-    // If this was focused, move focus to sibling or parent
+    // Client-initiated unmap — reparent client back to root, destroy frame
+    _ = xcb.c.xcb_reparent_window(ctx.conn, wd.id, ctx.root_window, @intCast(con.rect.x), @intCast(con.rect.y));
+    _ = xcb.c.xcb_destroy_window(ctx.conn, wd.frame_id);
+    unregisterWindow(ctx, wd.frame_id);
+
     if (con.is_focused) {
-        // Try next sibling, then prev sibling, then parent
         const new_focus = con.next orelse con.prev orelse con.parent;
         if (new_focus) |nf| {
             if (nf != ctx.tree_root) {
@@ -806,7 +855,6 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
         }
     }
 
-    // Unregister from window lookup and destroy
     unregisterWindow(ctx, ev.window);
     con.unlink();
     con.destroy(ctx.allocator);
@@ -817,10 +865,17 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
 }
 
 fn handleDestroyNotify(ctx: *EventContext, ev: *xcb.DestroyNotifyEvent) void {
-    // Only process SubstructureNotify events (from root window).
     if (ev.event == ev.window) return;
 
-    const con = findContainerByWindow(ctx,ev.window) orelse return;
+    const con = findContainerByWindow(ctx, ev.window) orelse return;
+
+    // Destroy frame window and unregister frame_id
+    if (con.window) |wd| {
+        if (wd.frame_id != 0) {
+            _ = xcb.c.xcb_destroy_window(ctx.conn, wd.frame_id);
+            unregisterWindow(ctx, wd.frame_id);
+        }
+    }
 
     if (con.is_focused) {
         const new_focus = con.next orelse con.prev orelse con.parent;
@@ -987,15 +1042,34 @@ fn handleMotionNotify(ctx: *EventContext, ev: *xcb.c.xcb_motion_notify_event_t) 
 
     // Apply immediately for smooth floating dragging
     if (con.window) |wd| {
-        const values = [_]u32{
-            @bitCast(con.rect.x),
-            @bitCast(con.rect.y),
-            con.rect.w,
-            con.rect.h,
-        };
-        const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
-            xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
-        _ = xcb.configureWindow(ctx.conn, wd.id, mask, &values);
+        if (wd.frame_id != 0) {
+            // Configure frame with position/size
+            const frame_values = [_]u32{
+                @bitCast(con.rect.x),
+                @bitCast(con.rect.y),
+                con.rect.w,
+                con.rect.h,
+            };
+            const frame_mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+                xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
+            _ = xcb.configureWindow(ctx.conn, wd.frame_id, frame_mask, &frame_values);
+
+            // Configure client at (0,0) inside frame
+            const client_values = [_]u32{ 0, 0, con.rect.w, con.rect.h };
+            const client_mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+                xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
+            _ = xcb.configureWindow(ctx.conn, wd.id, client_mask, &client_values);
+        } else {
+            const values = [_]u32{
+                @bitCast(con.rect.x),
+                @bitCast(con.rect.y),
+                con.rect.w,
+                con.rect.h,
+            };
+            const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+                xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
+            _ = xcb.configureWindow(ctx.conn, wd.id, mask, &values);
+        }
     }
 }
 
@@ -1008,7 +1082,7 @@ fn handleButtonRelease(ctx: *EventContext) void {
 }
 
 fn handleConfigureRequest(ctx: *EventContext, ev: *xcb.ConfigureRequestEvent) void {
-    const con = findContainerByWindow(ctx,ev.window);
+    const con = findContainerByWindow(ctx, ev.window);
 
     const should_forward = if (con) |c| c.is_floating else true;
     if (con) |c| {
@@ -1018,52 +1092,120 @@ fn handleConfigureRequest(ctx: *EventContext, ev: *xcb.ConfigureRequestEvent) vo
         }
     }
     if (should_forward) {
-        // Forward the configure request (floating or unmanaged)
-        var values: [7]u32 = undefined;
-        var i: usize = 0;
-        var mask: u16 = 0;
+        // Check if this is a managed window with a frame
+        const has_frame = if (con) |c| (if (c.window) |wd| wd.frame_id != 0 else false) else false;
 
-        if (ev.value_mask & xcb.CONFIG_WINDOW_X != 0) {
-            values[i] = @bitCast(@as(i32, ev.x));
-            mask |= xcb.CONFIG_WINDOW_X;
-            i += 1;
-        }
-        if (ev.value_mask & xcb.CONFIG_WINDOW_Y != 0) {
-            values[i] = @bitCast(@as(i32, ev.y));
-            mask |= xcb.CONFIG_WINDOW_Y;
-            i += 1;
-        }
-        if (ev.value_mask & xcb.CONFIG_WINDOW_WIDTH != 0) {
-            values[i] = @intCast(ev.width);
-            mask |= xcb.CONFIG_WINDOW_WIDTH;
-            i += 1;
-        }
-        if (ev.value_mask & xcb.CONFIG_WINDOW_HEIGHT != 0) {
-            values[i] = @intCast(ev.height);
-            mask |= xcb.CONFIG_WINDOW_HEIGHT;
-            i += 1;
-        }
-        if (ev.value_mask & xcb.CONFIG_WINDOW_BORDER_WIDTH != 0) {
-            values[i] = @intCast(ev.border_width);
-            mask |= xcb.CONFIG_WINDOW_BORDER_WIDTH;
-            i += 1;
-        }
-        if (ev.value_mask & xcb.CONFIG_WINDOW_SIBLING != 0) {
-            values[i] = ev.sibling;
-            mask |= xcb.CONFIG_WINDOW_SIBLING;
-            i += 1;
-        }
-        if (ev.value_mask & xcb.CONFIG_WINDOW_STACK_MODE != 0) {
-            values[i] = @intCast(ev.stack_mode);
-            mask |= xcb.CONFIG_WINDOW_STACK_MODE;
-            i += 1;
-        }
+        if (has_frame) {
+            // Managed floating window: configure frame with requested geometry,
+            // then configure client at (0,0) inside it.
+            const c = con.?;
+            const wd = c.window.?;
 
-        if (mask != 0) {
-            _ = xcb.configureWindow(ctx.conn, ev.window, mask, &values);
+            // Build frame configure values from request
+            var frame_values: [7]u32 = undefined;
+            var fi: usize = 0;
+            var frame_mask: u16 = 0;
+
+            // Track requested w/h for client configure
+            var req_w: u32 = c.rect.w;
+            var req_h: u32 = c.rect.h;
+
+            if (ev.value_mask & xcb.CONFIG_WINDOW_X != 0) {
+                frame_values[fi] = @bitCast(@as(i32, ev.x));
+                frame_mask |= xcb.CONFIG_WINDOW_X;
+                fi += 1;
+            }
+            if (ev.value_mask & xcb.CONFIG_WINDOW_Y != 0) {
+                frame_values[fi] = @bitCast(@as(i32, ev.y));
+                frame_mask |= xcb.CONFIG_WINDOW_Y;
+                fi += 1;
+            }
+            if (ev.value_mask & xcb.CONFIG_WINDOW_WIDTH != 0) {
+                req_w = @intCast(ev.width);
+                frame_values[fi] = req_w;
+                frame_mask |= xcb.CONFIG_WINDOW_WIDTH;
+                fi += 1;
+            }
+            if (ev.value_mask & xcb.CONFIG_WINDOW_HEIGHT != 0) {
+                req_h = @intCast(ev.height);
+                frame_values[fi] = req_h;
+                frame_mask |= xcb.CONFIG_WINDOW_HEIGHT;
+                fi += 1;
+            }
+            if (ev.value_mask & xcb.CONFIG_WINDOW_BORDER_WIDTH != 0) {
+                frame_values[fi] = @intCast(ev.border_width);
+                frame_mask |= xcb.CONFIG_WINDOW_BORDER_WIDTH;
+                fi += 1;
+            }
+            if (ev.value_mask & xcb.CONFIG_WINDOW_SIBLING != 0) {
+                frame_values[fi] = ev.sibling;
+                frame_mask |= xcb.CONFIG_WINDOW_SIBLING;
+                fi += 1;
+            }
+            if (ev.value_mask & xcb.CONFIG_WINDOW_STACK_MODE != 0) {
+                frame_values[fi] = @intCast(ev.stack_mode);
+                frame_mask |= xcb.CONFIG_WINDOW_STACK_MODE;
+                fi += 1;
+            }
+
+            if (frame_mask != 0) {
+                _ = xcb.configureWindow(ctx.conn, wd.frame_id, frame_mask, &frame_values);
+            }
+
+            // Configure client at (0,0) inside frame with requested size
+            if (ev.value_mask & (xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT) != 0) {
+                const client_values = [_]u32{ 0, 0, req_w, req_h };
+                const client_mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+                    xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
+                _ = xcb.configureWindow(ctx.conn, wd.id, client_mask, &client_values);
+            }
+        } else {
+            // Unmanaged window: forward directly as before
+            var values: [7]u32 = undefined;
+            var i: usize = 0;
+            var mask: u16 = 0;
+
+            if (ev.value_mask & xcb.CONFIG_WINDOW_X != 0) {
+                values[i] = @bitCast(@as(i32, ev.x));
+                mask |= xcb.CONFIG_WINDOW_X;
+                i += 1;
+            }
+            if (ev.value_mask & xcb.CONFIG_WINDOW_Y != 0) {
+                values[i] = @bitCast(@as(i32, ev.y));
+                mask |= xcb.CONFIG_WINDOW_Y;
+                i += 1;
+            }
+            if (ev.value_mask & xcb.CONFIG_WINDOW_WIDTH != 0) {
+                values[i] = @intCast(ev.width);
+                mask |= xcb.CONFIG_WINDOW_WIDTH;
+                i += 1;
+            }
+            if (ev.value_mask & xcb.CONFIG_WINDOW_HEIGHT != 0) {
+                values[i] = @intCast(ev.height);
+                mask |= xcb.CONFIG_WINDOW_HEIGHT;
+                i += 1;
+            }
+            if (ev.value_mask & xcb.CONFIG_WINDOW_BORDER_WIDTH != 0) {
+                values[i] = @intCast(ev.border_width);
+                mask |= xcb.CONFIG_WINDOW_BORDER_WIDTH;
+                i += 1;
+            }
+            if (ev.value_mask & xcb.CONFIG_WINDOW_SIBLING != 0) {
+                values[i] = ev.sibling;
+                mask |= xcb.CONFIG_WINDOW_SIBLING;
+                i += 1;
+            }
+            if (ev.value_mask & xcb.CONFIG_WINDOW_STACK_MODE != 0) {
+                values[i] = @intCast(ev.stack_mode);
+                mask |= xcb.CONFIG_WINDOW_STACK_MODE;
+                i += 1;
+            }
+
+            if (mask != 0) {
+                _ = xcb.configureWindow(ctx.conn, ev.window, mask, &values);
+            }
         }
     }
-
 }
 
 /// Send a synthetic ConfigureNotify to tell a tiled window its current geometry.
@@ -1099,6 +1241,12 @@ fn handlePropertyNotify(ctx: *EventContext, ev: *xcb.PropertyNotifyEvent) void {
         } else {
             // No window data to store into; free the new allocation
             if (title.len > 0) ctx.allocator.free(title);
+        }
+        // Redraw title bars if window is inside a tabbed/stacked container
+        if (con.parent) |parent| {
+            if (parent.layout == .tabbed or parent.layout == .stacked) {
+                render.redrawTitleBarsForContainer(ctx.conn, parent);
+            }
         }
     }
 
@@ -1185,6 +1333,16 @@ fn handleMappingNotify(ctx: *EventContext, _: *xcb.GenericEvent) void {
     }
 }
 
+fn handleExpose(ctx: *EventContext, ev: *xcb.c.xcb_expose_event_t) void {
+    if (ev.count != 0) return;
+    const con = findContainerByWindow(ctx, ev.window) orelse return;
+    if (con.parent) |parent| {
+        if (parent.layout == .tabbed or parent.layout == .stacked) {
+            render.redrawTitleBarsForContainer(ctx.conn, parent);
+        }
+    }
+}
+
 // --- Command execution ---
 
 pub fn executeCommand(ctx: *EventContext, cmd: command_mod.Command) void {
@@ -1204,7 +1362,7 @@ pub fn executeCommand(ctx: *EventContext, cmd: command_mod.Command) void {
         .scratchpad => executeScratchpad(ctx, cmd),
         .mode => executeMode(ctx, cmd),
         .reload => executeReload(ctx),
-        .restart => executeRestart(),
+        .restart => executeRestart(ctx),
         .exit => {
             ctx.running.* = false;
         },
@@ -1504,7 +1662,19 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
                             }
                             updateCurrentDesktop(ctx);
                             relayoutAndRender(ctx);
-                            broadcastIpcEvent(ctx, .workspace, "{\"change\":\"focus\"}");
+                            {
+                                var baf_ev_buf: [256]u8 = undefined;
+                                var baf_ev_fbs = std.io.fixedBufferStream(&baf_ev_buf);
+                                const baf_ev_w = baf_ev_fbs.writer();
+                                baf_ev_w.writeAll("{\"change\":\"focus\",\"current\":{\"name\":\"") catch {};
+                                const baf_ws_name = if (prev_ws.workspace) |wsd| wsd.name else "?";
+                                jsonEscapeWrite(baf_ev_w, baf_ws_name) catch {};
+                                baf_ev_w.writeAll("\",\"output\":\"") catch {};
+                                jsonEscapeWrite(baf_ev_w, getWorkspaceOutputName(prev_ws)) catch {};
+                                baf_ev_w.writeAll("\"}}") catch {};
+                                const baf_ev_json = baf_ev_fbs.getWritten();
+                                if (baf_ev_json.len > 0) broadcastIpcEvent(ctx, .workspace, baf_ev_json);
+                            }
                         }
                     }
                 }
@@ -1538,6 +1708,8 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
         const ev_w = ev_fbs.writer();
         ev_w.writeAll("{\"change\":\"focus\",\"current\":{\"name\":\"") catch {};
         jsonEscapeWrite(ev_w, ws_name) catch {};
+        ev_w.writeAll("\",\"output\":\"") catch {};
+        jsonEscapeWrite(ev_w, getWorkspaceOutputName(target_ws)) catch {};
         ev_w.writeAll("\"}}") catch {};
         const ev_json = ev_fbs.getWritten();
         if (ev_json.len > 0) broadcastIpcEvent(ctx, .workspace, ev_json);
@@ -1917,7 +2089,26 @@ fn executeReload(_: *EventContext) void {
     _ = linux.kill(linux.getpid(), linux.SIG.USR1);
 }
 
-pub fn executeRestart() void {
+/// Reparent all client windows back to root (ICCCM compliance for WM exit/restart).
+pub fn unreparentAll(ctx: *EventContext) void {
+    var it = ctx.window_map.iterator();
+    while (it.next()) |entry| {
+        const con = entry.value_ptr.*;
+        if (con.window) |wd| {
+            // Only process client window entries (not frame entries) to avoid double-processing
+            if (wd.frame_id != 0 and wd.id == entry.key_ptr.*) {
+                _ = xcb.c.xcb_change_save_set(ctx.conn, xcb.c.XCB_SET_MODE_DELETE, wd.id);
+                _ = xcb.c.xcb_reparent_window(ctx.conn, wd.id, ctx.root_window,
+                    @intCast(con.rect.x), @intCast(con.rect.y));
+                _ = xcb.mapWindow(ctx.conn, wd.id);
+                _ = xcb.c.xcb_destroy_window(ctx.conn, wd.frame_id);
+            }
+        }
+    }
+    _ = xcb.flush(ctx.conn);
+}
+
+pub fn executeRestart(ctx: *EventContext) void {
     // Re-exec ourselves. This preserves the X connection and managed windows
     // because the new process inherits file descriptors.
     std.debug.print("zephwm: restarting via execvp\n", .{});
@@ -1925,7 +2116,9 @@ pub fn executeRestart() void {
     // Set restart flag so exec commands are skipped on re-exec
     _ = setenv("ZEPHWM_RESTART", "1", 1);
 
-    // Read /proc/self/exe to get our binary path
+    // Read /proc/self/exe to get our binary path.
+    // Must succeed before we unreparent anything — if it fails, abort cleanly
+    // so the WM continues running in a valid state.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe_path = std.fs.readLinkAbsolute("/proc/self/exe", &exe_buf) catch {
         std.debug.print("zephwm: restart failed: cannot read /proc/self/exe\n", .{});
@@ -1936,10 +2129,18 @@ pub fn executeRestart() void {
     exe_buf[exe_path.len] = 0;
     const exe_z: [*:0]const u8 = @ptrCast(exe_buf[0..exe_path.len :0]);
 
+    // Unreparent all client windows back to root right before exec.
+    // We do this only after the exe path is confirmed valid so the WM
+    // is not left in a broken state if path resolution failed above.
+    unreparentAll(ctx);
+
     const argv = [_:null]?[*:0]const u8{exe_z};
     _ = execvp(exe_z, &argv);
-    // If execvp returns, it failed
+    // If execvp returns, it failed — the WM state is now broken (windows
+    // already unreparented), so exit immediately rather than returning to
+    // a corrupted event loop.
     std.debug.print("zephwm: restart execvp failed\n", .{});
+    std.c._exit(1);
 }
 
 fn executeMode(ctx: *EventContext, cmd: command_mod.Command) void {

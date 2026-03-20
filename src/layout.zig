@@ -1,8 +1,8 @@
 const std = @import("std");
 const log = std.log.scoped(.layout);
 const tree = @import("tree.zig");
+const render = @import("render.zig");
 
-const TAB_BAR_HEIGHT: u32 = 16;
 const MAX_TILING_CHILDREN: usize = 64;
 
 /// Apply layout to a container's children. Recursively descends into split_con children.
@@ -44,7 +44,7 @@ pub fn apply(con: *tree.Container, gap: u32, border: u32) void {
             // Monocle: single child fills entire area, no gap, no border adjustment
             const child = tiling[0];
             child.rect = rect;
-            child.window_rect = shrinkByBorder(rect, border);
+            child.window_rect = child.rect;
             child.dirty = false;
             recurse(child, gap, border);
         },
@@ -91,7 +91,7 @@ fn applyHsplit(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u
         };
 
         child.rect = .{ .x = x, .y = rect.y, .w = w, .h = rect.h };
-        child.window_rect = shrinkByBorder(child.rect, border);
+        child.window_rect = child.rect;
         child.dirty = false;
         recurse(child, gap, border);
 
@@ -127,7 +127,7 @@ fn applyVsplit(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u
         };
 
         child.rect = .{ .x = rect.x, .y = y, .w = rect.w, .h = h };
-        child.window_rect = shrinkByBorder(child.rect, border);
+        child.window_rect = child.rect;
         child.dirty = false;
         recurse(child, gap, border);
 
@@ -136,30 +136,30 @@ fn applyVsplit(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u
 }
 
 fn applyTabbed(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u32) void {
-    // Tab bar at top: 16px per container (but spec says 16px total tab bar)
-    const content_y: i32 = rect.y + TAB_BAR_HEIGHT;
-    const content_h: u32 = if (rect.h > TAB_BAR_HEIGHT) rect.h - TAB_BAR_HEIGHT else 0;
+    const tbh: u32 = @intCast(render.tab_bar_height);
+    const content_y: i32 = rect.y + @as(i32, @intCast(tbh));
+    const content_h: u32 = if (rect.h > tbh) rect.h - tbh else 0;
     const child_rect: tree.Rect = .{ .x = rect.x, .y = content_y, .w = rect.w, .h = content_h };
 
     for (children) |child| {
         child.rect = child_rect;
-        child.window_rect = shrinkByBorder(child_rect, border);
+        child.window_rect = child_rect;
         child.dirty = false;
         recurse(child, gap, border);
     }
 }
 
 fn applyStacked(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u32) void {
-    // Stacked: one title bar row per window (TAB_BAR_HEIGHT * n), then the content area.
     const n: u32 = @intCast(children.len);
-    const header_h: u32 = TAB_BAR_HEIGHT * n;
+    const tbh: u32 = @intCast(render.tab_bar_height);
+    const header_h: u32 = tbh * n;
     const content_y: i32 = rect.y + @as(i32, @intCast(header_h));
     const content_h: u32 = if (rect.h > header_h) rect.h - header_h else 0;
     const child_rect: tree.Rect = .{ .x = rect.x, .y = content_y, .w = rect.w, .h = content_h };
 
     for (children) |child| {
         child.rect = child_rect;
-        child.window_rect = shrinkByBorder(child_rect, border);
+        child.window_rect = child_rect;
         child.dirty = false;
         recurse(child, gap, border);
     }
@@ -170,17 +170,4 @@ fn recurse(child: *tree.Container, gap: u32, border: u32) void {
     if (child.type == .split_con) {
         apply(child, gap, border);
     }
-}
-
-/// Return rect shrunk by `border` pixels on each side.
-fn shrinkByBorder(rect: tree.Rect, border: u32) tree.Rect {
-    if (border == 0) return rect;
-    const b: i32 = @intCast(border);
-    const b2: u32 = border * 2;
-    return .{
-        .x = rect.x + b,
-        .y = rect.y + b,
-        .w = if (rect.w > b2) rect.w - b2 else 0,
-        .h = if (rect.h > b2) rect.h - b2 else 0,
-    };
 }
