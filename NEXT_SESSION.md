@@ -3,13 +3,17 @@
 ## What is zephwm?
 i3-compatible tiling WM written in Zig. ~7,500 LOC (src + bar), 3 binaries (zephwm, zephwm-msg, zephwm-bar). Target: HackberryPi Zero (RPi Zero 2W, 512MB RAM). All tests pass (~700+ tests across 7 suites), zero memory leaks.
 
-## What's done (v0.3.0)
+## What's done (v0.3.1)
 - **Frame windows**: full X11 reparenting with save-set for crash recovery, ICCCM-compliant unreparent on shutdown/restart
 - **Font detection**: 4-font fallback (fixed → misc-fixed-semicondensed → misc-fixed-normal → cursor) with xcb_query_font metrics
 - **Per-output bar**: one bar window per monitor, output-scoped _NET_WM_STRUT_PARTIAL, per-bar workspace filtering
 - **i3bar click protocol**: bidirectional stdin/stdout, per-block tracking (StatusBlock), protocol header detection (click_events:true)
 - **Synthetic ConfigureNotify**: sent to all clients after relayout (ICCCM requirement for reparenting WMs)
 - **Border layout fix**: frame content shrunk by 2*border so borders fit within layout rect (visible on all 4 sides)
+- **`border normal`**: i3-compatible title bar on individual windows — per-window title bar with ellipsis text truncation, deferred flush-then-draw, layout space reservation, Expose/PropertyNotify redraw
+- **`border normal <width>`**: width argument parsing for both `border normal N` and `border pixel N`
+- **Ellipsis**: long window titles truncated with "..." in tabbed, stacked, and border normal title bars
+- **Frame background fix**: XCB_CW_BACK_PIXMAP=None prevents X server white repaint on resize
 - Core tiling: hsplit/vsplit/tabbed/stacked, focus/move/resize, marks, scratchpad
 - Multi-monitor: XRandR 1.5, focus_output, hot-plug, workspace-output config, move workspace to output
 - IPC: all 11 message types, event subscription (workspace/window/mode/binding/output)
@@ -35,7 +39,7 @@ bash test_xephyr_extended.sh      # 59 advanced tests
 bash test_xephyr_multimon.sh      # 35 multi-monitor tests
 bash test_xephyr_resolutions.sh   # 180 multi-resolution (10 resolutions)
 bash test_xephyr_visual.sh        # 170 pixel verification (10 resolutions)
-bash test_docker_realapps.sh      # 39 Docker tests (xterm + alacritty + kitty, screenshot pixel checks)
+bash test_docker_realapps.sh      # 65 Docker tests (xterm + alacritty + kitty, screenshot pixel checks)
 ```
 Docker tests use Xvfb inside container (2GB mem limit), no host impact.
 
@@ -48,7 +52,7 @@ Docker tests use Xvfb inside container (2GB mem limit), no host impact.
 
 ### Known limitations
 - kitty/alacritty pixel content checks skipped in Docker (GPU rendering doesn't work with Xvfb)
-- `border normal` renders same as `pixel` (no title bar in border — future feature)
+- `border toggle` does not reset `border_width_override` when cycling styles (pre-existing)
 - `bindcode` not implemented (keysym works for all keys)
 
 ## Key architecture
