@@ -184,10 +184,11 @@ cp /path/to/zephwm/config/default_config ~/.config/zephwm/config
 
 | Key | Action |
 |-----|--------|
-| `Mod4+Return` | Open terminal (configurable via `$term` variable) |
+| `Mod4+Return` | Open terminal (`$term`, default: st) |
+| `Mod4+d` | App launcher (rofi) |
 | `Mod4+Shift+q` | Kill focused window |
-| `Mod4+h/j/k/l` | Focus left/down/up/right |
-| `Mod4+Shift+h/j/k/l` | Move window left/down/up/right |
+| `Mod4+h/j/k/l` (or arrows) | Focus left/down/up/right |
+| `Mod4+Shift+h/j/k/l` (or arrows) | Move window left/down/up/right |
 | `Mod4+b` | Split horizontal |
 | `Mod4+v` | Split vertical |
 | `Mod4+w` | Layout tabbed |
@@ -195,6 +196,8 @@ cp /path/to/zephwm/config/default_config ~/.config/zephwm/config
 | `Mod4+e` | Layout toggle split |
 | `Mod4+f` | Fullscreen toggle |
 | `Mod4+Shift+space` | Floating toggle |
+| `Mod4+space` | Focus mode toggle (tiling/floating) |
+| `Mod4+a` | Focus parent |
 | `Mod4+r` | Resize mode |
 | `Mod4+1-9,0` | Switch to workspace 1-10 |
 | `Mod4+Shift+1-9,0` | Move to workspace 1-10 |
@@ -213,6 +216,9 @@ zephwm-msg 'split v'
 zephwm-msg 'resize grow width 100 px'
 zephwm-msg 'workspace number 3'
 zephwm-msg 'focus output right'
+zephwm-msg 'border pixel 3'
+zephwm-msg 'sticky enable'
+zephwm-msg 'move workspace to output right'
 zephwm-msg -t get_workspaces
 zephwm-msg -t get_tree
 zephwm-msg -t get_outputs

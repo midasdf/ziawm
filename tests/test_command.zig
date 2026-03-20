@@ -15,6 +15,18 @@ test "parse split v" {
     try std.testing.expectEqualStrings("v", cmd.args[0].?);
 }
 
+test "parse splith (no space)" {
+    const cmd = command.parse("splith") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.split, cmd.type);
+    try std.testing.expectEqualStrings("h", cmd.args[0].?);
+}
+
+test "parse splitv (no space)" {
+    const cmd = command.parse("splitv") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.split, cmd.type);
+    try std.testing.expectEqualStrings("v", cmd.args[0].?);
+}
+
 // ---- focus ----
 
 test "parse focus left" {

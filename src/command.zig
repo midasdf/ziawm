@@ -161,11 +161,17 @@ pub fn parse(input: []const u8) ?Command {
         return Command{ .type = .fullscreen, .args = .{ null, null, null, null }, .criteria = crit };
     }
 
-    // "split h/v"
+    // "split h/v" or "splith"/"splitv" (i3 accepts both forms)
     if (startsWith(u8, s, "split ")) {
         const rest = trimLeft(s["split ".len..]);
         if (rest.len == 0) return null;
         return Command{ .type = .split, .args = .{ rest, null, null, null }, .criteria = crit };
+    }
+    if (std.mem.eql(u8, s, "splith")) {
+        return Command{ .type = .split, .args = .{ "h", null, null, null }, .criteria = crit };
+    }
+    if (std.mem.eql(u8, s, "splitv")) {
+        return Command{ .type = .split, .args = .{ "v", null, null, null }, .criteria = crit };
     }
 
     // "focus left/right/up/down/parent/child/mode_toggle"
