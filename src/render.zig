@@ -320,8 +320,15 @@ fn applyWindow(
                 if (visible_count > 1) {
                     title_offset = if (parent.layout == .tabbed) tab_bar_height else tab_bar_height * visible_count;
                 }
+            } else if (con.border_style == .normal) {
+                // border normal: individual title bar on this window
+                title_offset = tab_bar_height;
             }
         }
+    }
+    // Also handle border normal for floating windows
+    if (con.is_floating and con.border_style == .normal) {
+        title_offset = tab_bar_height;
     }
 
     // Configure frame: position and size (includes title bar area)
