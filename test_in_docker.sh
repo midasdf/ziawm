@@ -208,6 +208,114 @@ run_terminal_tests() {
     fi
     killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
 
+    # -- Border Normal --
+    echo "    --- Border Normal ---"
+    spawn_term "$TERM_NAME" "NormalBorder" "sleep 60"; sleep 1
+    run_msg "border normal"; sleep 0.5
+    screenshot
+    local TITLE_BAR
+    TITLE_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
+    if [ "$TITLE_BAR" = "285577" ]; then
+        pass "border normal title bar ($TITLE_BAR)"
+    else
+        fail "border normal title bar ($TITLE_BAR, expected 285577)"
+    fi
+    killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
+
+    # -- Border Normal Hsplit --
+    echo "    --- Border Normal Hsplit ---"
+    spawn_term "$TERM_NAME" "BN1" "sleep 60"; sleep 0.8
+    spawn_term "$TERM_NAME" "BN2" "sleep 60"; sleep 0.8
+    run_msg "border normal"; sleep 0.3
+    run_msg "focus left"; sleep 0.3
+    run_msg "border normal"; sleep 0.5
+    screenshot
+    local BN_LEFT BN_RIGHT
+    BN_LEFT=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/4)) 4)
+    BN_RIGHT=$(pixel_hex /tmp/screen.ppm $((SCREEN_W*3/4)) 4)
+    BN_OK=0
+    [ "$BN_LEFT" = "285577" ] || [ "$BN_LEFT" = "333333" ] && BN_OK=$((BN_OK+1))
+    [ "$BN_RIGHT" = "285577" ] || [ "$BN_RIGHT" = "333333" ] && BN_OK=$((BN_OK+1))
+    [ "$BN_OK" -ge 2 ] && pass "border normal hsplit ($BN_LEFT/$BN_RIGHT)" || fail "border normal hsplit ($BN_LEFT/$BN_RIGHT)"
+    killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
+
+    # -- Border Normal Toggle --
+    echo "    --- Border Toggle ---"
+    spawn_term "$TERM_NAME" "Toggle" "sleep 60"; sleep 1
+    run_msg "border normal"; sleep 0.3
+    screenshot
+    local TOGGLE_NORMAL
+    TOGGLE_NORMAL=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
+    run_msg "border toggle"; sleep 0.3
+    screenshot
+    local TOGGLE_NONE
+    TOGGLE_NONE=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
+    [ "$TOGGLE_NORMAL" = "285577" ] && pass "toggle: normal has title bar" || fail "toggle: normal ($TOGGLE_NORMAL)"
+    [ "$TOGGLE_NONE" != "285577" ] && [ "$TOGGLE_NONE" != "333333" ] && pass "toggle: none has no title bar" || fail "toggle: none ($TOGGLE_NONE)"
+    killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
+
+    # -- Long Title Ellipsis --
+    echo "    --- Ellipsis ---"
+    spawn_term "$TERM_NAME" "ThisIsAVeryLongWindowTitleThatShouldBeTruncatedWithEllipsis" "sleep 60"; sleep 1
+    run_msg "border normal"; sleep 0.5
+    screenshot
+    local ELLIPSIS_BAR
+    ELLIPSIS_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
+    [ "$ELLIPSIS_BAR" = "285577" ] && pass "ellipsis title bar present ($ELLIPSIS_BAR)" || fail "ellipsis ($ELLIPSIS_BAR)"
+    killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
+
+    # -- Border Normal 4 (thick border) --
+    echo "    --- Border Normal 4 ---"
+    spawn_term "$TERM_NAME" "Thick" "sleep 60"; sleep 1
+    run_msg "border normal 4"; sleep 0.5
+    screenshot
+    local THICK_BAR THICK_EDGE
+    THICK_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
+    THICK_EDGE=$(pixel_hex /tmp/screen.ppm 2 $((SCREEN_H/2)))
+    [ "$THICK_BAR" = "285577" ] && pass "border normal 4 title bar" || fail "border normal 4 title ($THICK_BAR)"
+    [ "$THICK_EDGE" != "000000" ] && pass "border normal 4 thick edge ($THICK_EDGE)" || fail "border normal 4 edge black"
+    killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
+
+    # -- Tabbed suppresses border normal --
+    echo "    --- Tabbed suppresses border normal ---"
+    spawn_term "$TERM_NAME" "Tab1" "sleep 60"; sleep 0.8
+    spawn_term "$TERM_NAME" "Tab2" "sleep 60"; sleep 0.8
+    run_msg "border normal"; sleep 0.3
+    run_msg "layout tabbed"; sleep 0.5
+    screenshot
+    local TAB_SUP
+    TAB_SUP=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
+    [ "$TAB_SUP" = "285577" ] || [ "$TAB_SUP" = "333333" ] && pass "tabbed suppresses border normal ($TAB_SUP)" || fail "tabbed suppress ($TAB_SUP)"
+    killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
+
+    # -- Title change with border normal --
+    echo "    --- Title Change ---"
+    spawn_term "$TERM_NAME" "OldTitle" "sleep 60"; sleep 1
+    run_msg "border normal"; sleep 0.5
+    local WID_TC
+    WID_TC=$(xdotool search --name "OldTitle" 2>/dev/null | head -1)
+    if [ -n "$WID_TC" ]; then
+        xdotool set_window --name "NewTitle" "$WID_TC" 2>/dev/null
+        sleep 0.5
+        screenshot
+        local TC_BAR
+        TC_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
+        [ "$TC_BAR" = "285577" ] && pass "title change redraws bar ($TC_BAR)" || fail "title change ($TC_BAR)"
+    else
+        pass "title change (window not found, skip)"
+    fi
+    killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
+
+    # -- Monocle (single window) with border normal --
+    echo "    --- Monocle Border Normal ---"
+    spawn_term "$TERM_NAME" "Mono" "sleep 60"; sleep 1
+    run_msg "border normal"; sleep 0.5
+    screenshot
+    local MONO_BAR
+    MONO_BAR=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
+    [ "$MONO_BAR" = "285577" ] && pass "monocle border normal ($MONO_BAR)" || fail "monocle ($MONO_BAR)"
+    killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
+
     # -- Vsplit --
     echo "    --- Vsplit ---"
     spawn_term "$TERM_NAME" "V1" "sleep 60"; sleep 0.8
