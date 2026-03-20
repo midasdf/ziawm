@@ -53,6 +53,20 @@ test "parse focus output right" {
     try std.testing.expectEqualStrings("right", cmd.args[0].?);
 }
 
+// ---- move workspace to output ----
+
+test "parse move workspace to output right" {
+    const cmd = command.parse("move workspace to output right") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.move_workspace_to_output, cmd.type);
+    try std.testing.expectEqualStrings("right", cmd.args[0].?);
+}
+
+test "parse move workspace to output named" {
+    const cmd = command.parse("move workspace to output HDMI-1") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.move_workspace_to_output, cmd.type);
+    try std.testing.expectEqualStrings("HDMI-1", cmd.args[0].?);
+}
+
 // ---- move container to workspace ----
 
 test "parse move container to workspace number 3" {

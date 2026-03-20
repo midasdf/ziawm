@@ -1420,6 +1420,7 @@ pub fn executeCommand(ctx: *EventContext, cmd: command_mod.Command) void {
         },
         .resize => executeResize(ctx, cmd),
         .focus_output => executeFocusOutput(ctx, cmd),
+        .move_workspace_to_output => executeMoveWorkspaceToOutput(ctx, cmd),
         .nop => {},
         .sticky => executeSticky(ctx, cmd),
     }
@@ -2205,6 +2206,54 @@ fn executeFocusOutput(ctx: *EventContext, cmd: command_mod.Command) void {
         }
         relayoutAndRender(ctx);
     }
+}
+
+fn executeMoveWorkspaceToOutput(ctx: *EventContext, cmd: command_mod.Command) void {
+    const direction = cmd.args[0] orelse return;
+    const current_ws = getFocusedWorkspace(ctx.tree_root) orelse return;
+    const current_out = current_ws.parent orelse return;
+    if (current_out.type != .output) return;
+
+    // Find target output
+    const target_out = blk: {
+        if (std.mem.eql(u8, direction, "left")) {
+            break :blk output.findAdjacent(ctx.tree_root, current_out, .left);
+        } else if (std.mem.eql(u8, direction, "right")) {
+            break :blk output.findAdjacent(ctx.tree_root, current_out, .right);
+        } else if (std.mem.eql(u8, direction, "up")) {
+            break :blk output.findAdjacent(ctx.tree_root, current_out, .up);
+        } else if (std.mem.eql(u8, direction, "down")) {
+            break :blk output.findAdjacent(ctx.tree_root, current_out, .down);
+        } else {
+            // Named output
+            break :blk output.findByName(ctx.tree_root, direction);
+        }
+    } orelse return;
+
+    if (target_out == current_out) return;
+
+    // Move workspace to target output
+    current_ws.unlink();
+    target_out.appendChild(current_ws);
+    current_ws.rect = target_out.rect;
+
+    // Update workspace output_name to match target output
+    if (current_ws.workspace) |*wsd| {
+        if (target_out.workspace) |tout_wsd| {
+            wsd.output_name = tout_wsd.output_name;
+        }
+    }
+
+    // Ensure source output still has at least one workspace
+    if (current_out.children.first == null) {
+        if (workspace.create(ctx.allocator, "1", 1)) |new_ws| {
+            current_out.appendChild(new_ws);
+            new_ws.rect = current_out.rect;
+        } else |_| {}
+    }
+
+    relayoutAndRender(ctx);
+    broadcastIpcEvent(ctx, .workspace, "{\"change\":\"move\"}");
 }
 
 /// Static sentinel for the default mode — used for pointer comparison to detect ownership.

@@ -21,6 +21,7 @@ pub const CommandType = enum {
     restart,
     exit,
     focus_output,
+    move_workspace_to_output,
     nop,
     sticky,
 };
@@ -80,6 +81,13 @@ pub fn parse(input: []const u8) ?Command {
         const rest = trimLeft(s["move container to workspace ".len..]);
         if (rest.len == 0) return null;
         return Command{ .type = .move_workspace, .args = .{ rest, null, null, null }, .criteria = crit };
+    }
+
+    // "move workspace to output NAME/left/right/up/down"
+    if (startsWith(u8, s, "move workspace to output ")) {
+        const rest = trimLeft(s["move workspace to output ".len..]);
+        if (rest.len == 0) return null;
+        return Command{ .type = .move_workspace_to_output, .args = .{ rest, null, null, null }, .criteria = crit };
     }
 
     // "move scratchpad"
