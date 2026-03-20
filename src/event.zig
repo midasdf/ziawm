@@ -1324,6 +1324,17 @@ fn handlePropertyNotify(ctx: *EventContext, ev: *xcb.PropertyNotifyEvent) void {
                 render.redrawTitleBarsForContainer(ctx.conn, parent);
             }
         }
+        // Redraw border normal title bar
+        if (con.border_style == .normal and con.type == .window) {
+            const suppress = if (con.parent) |parent|
+                (parent.layout == .tabbed or parent.layout == .stacked) and parent.children.len() > 1
+            else
+                false;
+            if (!suppress) {
+                render.drawNormalTitleBar(ctx.conn, con);
+                _ = xcb.flush(ctx.conn);
+            }
+        }
     }
 
     // Update urgency from WM_HINTS
@@ -1428,9 +1439,22 @@ fn handleMappingNotify(ctx: *EventContext, _: *xcb.GenericEvent) void {
 fn handleExpose(ctx: *EventContext, ev: *xcb.c.xcb_expose_event_t) void {
     if (ev.count != 0) return;
     const con = findContainerByWindow(ctx, ev.window) orelse return;
+    // Redraw tabbed/stacked parent headers
     if (con.parent) |parent| {
         if (parent.layout == .tabbed or parent.layout == .stacked) {
             render.redrawTitleBarsForContainer(ctx.conn, parent);
+        }
+    }
+    // Redraw border normal title bar on this window
+    if (con.border_style == .normal and con.type == .window) {
+        // Skip if inside tabbed/stacked with >1 children (parent headers take precedence)
+        const suppress = if (con.parent) |parent|
+            (parent.layout == .tabbed or parent.layout == .stacked) and parent.children.len() > 1
+        else
+            false;
+        if (!suppress) {
+            render.drawNormalTitleBar(ctx.conn, con);
+            _ = xcb.flush(ctx.conn);
         }
     }
 }

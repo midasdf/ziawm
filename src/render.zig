@@ -73,16 +73,30 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
             _ = xcb.c.xcb_poly_fill_rectangle(conn, frame_win, title_gc, 1, &rect);
 
             const title = if (child.window) |wd| wd.title else if (child.workspace) |wsd| wsd.name else "?";
-            // Truncate to fit tab width (leave 8px padding)
+            // Truncate to fit tab width (leave 8px padding), with ellipsis
             const max_chars: usize = if (font_char_width > 0 and tab_w > 8)
                 @intCast((tab_w - 8) / font_char_width)
             else
                 0;
-            const text_len: u8 = @intCast(@min(title.len, @min(max_chars, 255)));
-            if (text_len > 0) {
+            const capped_max: usize = @min(max_chars, 255);
+            if (capped_max > 0) {
+                var buf: [256]u8 = undefined;
+                var text_ptr: [*]const u8 = title.ptr;
+                var text_len: u8 = @intCast(@min(title.len, capped_max));
+
+                if (title.len > capped_max and capped_max >= 4) {
+                    const trunc_len = capped_max - 3;
+                    @memcpy(buf[0..trunc_len], title[0..trunc_len]);
+                    buf[trunc_len] = '.';
+                    buf[trunc_len + 1] = '.';
+                    buf[trunc_len + 2] = '.';
+                    text_ptr = &buf;
+                    text_len = @intCast(capped_max);
+                }
+
                 const text_fg = [_]u32{0xffffff};
                 _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
-                _ = xcb.c.xcb_image_text_8(conn, text_len, frame_win, title_gc, x + 4, text_y_offset, title.ptr);
+                _ = xcb.c.xcb_image_text_8(conn, text_len, frame_win, title_gc, x + 4, text_y_offset, text_ptr);
             }
             x += @intCast(tab_w);
         }
