@@ -366,6 +366,10 @@ fn relayoutAndRender(ctx: *EventContext) void {
 
     const default_border: u16 = if (ctx.config) |c| @intCast(c.border_px) else 1;
     render.applyTree(ctx.conn, ctx.tree_root, ctx.border_focus_color, ctx.border_unfocus_color, ctx.root_window, default_border);
+
+    // Send synthetic ConfigureNotify to all managed windows (ICCCM requirement).
+    // Reparented clients need this to know their actual screen position and size.
+    sendConfigureNotifyAll(ctx);
 }
 
 // --- EWMH property update helpers ---
@@ -1245,24 +1249,59 @@ fn handleConfigureRequest(ctx: *EventContext, ev: *xcb.ConfigureRequestEvent) vo
     }
 }
 
-/// Send a synthetic ConfigureNotify to tell a tiled window its current geometry.
+/// Send a synthetic ConfigureNotify to tell a client window its current geometry.
+/// Uses screen-absolute coordinates accounting for frame border offset.
 fn sendConfigureNotify(ctx: *EventContext, con: *tree.Container) void {
     const wd = con.window orelse return;
     const r = con.window_rect;
+
+    // Compute effective border for screen-absolute position
+    const eb: i32 = blk: {
+        if (con.border_style == .none) break :blk 0;
+        if (con.border_width_override >= 0) break :blk @intCast(con.border_width_override);
+        if (ctx.config) |c| break :blk @intCast(c.border_px);
+        break :blk 1;
+    };
+
+    // Client's screen position = frame position + border + client offset within frame
+    // For tiled: x = rect.x + border, y = rect.y + border (no title offset here,
+    // the rect already accounts for layout positioning)
+    const screen_x: i16 = @intCast(r.x + eb);
+    const screen_y: i16 = @intCast(r.y + eb);
+
+    // Client size = frame content size - title offset
+    // applyWindow sets these, but we compute from layout rect for the synthetic event
+    const b2: u32 = @as(u32, @intCast(eb)) * 2;
+    const client_w: u16 = @intCast(if (r.w > b2) r.w - b2 else 1);
+    const client_h: u16 = @intCast(if (r.h > b2) r.h - b2 else 1);
 
     var event_data: xcb.c.xcb_configure_notify_event_t = std.mem.zeroes(xcb.c.xcb_configure_notify_event_t);
     event_data.response_type = xcb.CONFIGURE_NOTIFY;
     event_data.event = wd.id;
     event_data.window = wd.id;
-    event_data.x = @intCast(r.x);
-    event_data.y = @intCast(r.y);
-    event_data.width = @intCast(r.w);
-    event_data.height = @intCast(r.h);
+    event_data.x = screen_x;
+    event_data.y = screen_y;
+    event_data.width = client_w;
+    event_data.height = client_h;
     event_data.border_width = 0;
     event_data.above_sibling = xcb.WINDOW_NONE;
     event_data.override_redirect = 0;
 
     _ = xcb.sendEvent(ctx.conn, 0, wd.id, xcb.EVENT_MASK_STRUCTURE_NOTIFY, @ptrCast(&event_data));
+}
+
+/// Send ConfigureNotify to all managed windows after relayout.
+fn sendConfigureNotifyAll(ctx: *EventContext) void {
+    var it = ctx.window_map.iterator();
+    while (it.next()) |entry| {
+        const con = entry.value_ptr.*;
+        if (con.window) |wd| {
+            // Only process client window entries (skip frame_id entries)
+            if (entry.key_ptr.* == wd.id) {
+                sendConfigureNotify(ctx, con);
+            }
+        }
+    }
 }
 
 fn handlePropertyNotify(ctx: *EventContext, ev: *xcb.PropertyNotifyEvent) void {
