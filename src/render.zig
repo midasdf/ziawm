@@ -7,7 +7,6 @@ const tree = @import("tree.zig");
 var title_gc: u32 = 0;
 var title_font: u32 = 0;
 var title_gc_initialized: bool = false;
-var cached_root_window: xcb.Window = 0;
 
 /// Font metrics, populated by ensureTitleGc
 var font_ascent: u16 = 10;
@@ -168,7 +167,6 @@ pub fn applyTree(
     root_window: xcb.Window,
 ) void {
     ensureTitleGc(conn, root_window);
-    cached_root_window = root_window;
     // Iterate over outputs
     var out_cur = root.children.first;
     while (out_cur) |output_con| : (out_cur = output_con.next) {

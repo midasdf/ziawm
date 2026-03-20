@@ -155,9 +155,21 @@ fn buildWorkspacesJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
 
             std.fmt.format(w, "{{\"num\":{d},\"name\":\"", .{num}) catch return "[]";
             jsonEscapeWrite(w, name) catch return "[]";
-            std.fmt.format(w, "\",\"visible\":{},\"focused\":{},\"output\":\"default\",\"urgent\":{},\"rect\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}}}}", .{
-                visible,
-                focused,
+            // Get output name from parent output container
+            const ws_output_name = blk: {
+                if (ws.parent) |parent| {
+                    if (parent.type == .output) {
+                        if (parent.workspace) |parent_wsd| {
+                            if (parent_wsd.output_name.len > 0) break :blk parent_wsd.output_name;
+                        }
+                    }
+                }
+                break :blk "default";
+            };
+            w.writeAll("\",\"visible\":") catch return "[]";
+            std.fmt.format(w, "{},\"focused\":{},\"output\":\"", .{ visible, focused }) catch return "[]";
+            jsonEscapeWrite(w, ws_output_name) catch return "[]";
+            std.fmt.format(w, "\",\"urgent\":{},\"rect\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}}}}", .{
                 urgent,
                 ws.rect.x,
                 ws.rect.y,

@@ -71,6 +71,18 @@ fn jsonEscapeWrite(w: anytype, s: []const u8) !void {
     }
 }
 
+/// Get the output name for a workspace container.
+fn getWorkspaceOutputName(ws: *tree.Container) []const u8 {
+    if (ws.parent) |parent| {
+        if (parent.type == .output) {
+            if (parent.workspace) |wsd| {
+                if (wsd.output_name.len > 0) return wsd.output_name;
+            }
+        }
+    }
+    return "default";
+}
+
 /// Broadcast an IPC event to all subscribed clients.
 pub fn broadcastIpcEvent(ctx: *EventContext, event_type: ipc.EventType, payload: []const u8) void {
     const mask_bit: u8 = switch (event_type) {
@@ -1638,7 +1650,19 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
                             }
                             updateCurrentDesktop(ctx);
                             relayoutAndRender(ctx);
-                            broadcastIpcEvent(ctx, .workspace, "{\"change\":\"focus\"}");
+                            {
+                                var baf_ev_buf: [256]u8 = undefined;
+                                var baf_ev_fbs = std.io.fixedBufferStream(&baf_ev_buf);
+                                const baf_ev_w = baf_ev_fbs.writer();
+                                baf_ev_w.writeAll("{\"change\":\"focus\",\"current\":{\"name\":\"") catch {};
+                                const baf_ws_name = if (prev_ws.workspace) |wsd| wsd.name else "?";
+                                jsonEscapeWrite(baf_ev_w, baf_ws_name) catch {};
+                                baf_ev_w.writeAll("\",\"output\":\"") catch {};
+                                jsonEscapeWrite(baf_ev_w, getWorkspaceOutputName(prev_ws)) catch {};
+                                baf_ev_w.writeAll("\"}}") catch {};
+                                const baf_ev_json = baf_ev_fbs.getWritten();
+                                if (baf_ev_json.len > 0) broadcastIpcEvent(ctx, .workspace, baf_ev_json);
+                            }
                         }
                     }
                 }
@@ -1672,6 +1696,8 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
         const ev_w = ev_fbs.writer();
         ev_w.writeAll("{\"change\":\"focus\",\"current\":{\"name\":\"") catch {};
         jsonEscapeWrite(ev_w, ws_name) catch {};
+        ev_w.writeAll("\",\"output\":\"") catch {};
+        jsonEscapeWrite(ev_w, getWorkspaceOutputName(target_ws)) catch {};
         ev_w.writeAll("\"}}") catch {};
         const ev_json = ev_fbs.getWritten();
         if (ev_json.len > 0) broadcastIpcEvent(ctx, .workspace, ev_json);

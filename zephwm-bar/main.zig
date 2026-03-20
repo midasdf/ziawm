@@ -1,5 +1,6 @@
 // zephwm-bar — status bar for zephwm
 // Renders workspace buttons + status text using XCB + Xft
+// Supports per-output bars: one bar window per monitor output.
 const std = @import("std");
 const ipc = @import("ipc");
 
@@ -25,6 +26,22 @@ const FOCUSED_FG_STR = "#ffffff";
 const URGENT_BG: u32 = 0x900000;
 const UNFOCUSED_FG_STR = "#888888";
 const FONT_NAME = "monospace:size=10";
+
+const MAX_OUTPUTS = 8;
+const MaxWorkspaces = 16;
+
+const BarWindow = struct {
+    output_name: [64]u8 = undefined,
+    output_name_len: u8 = 0,
+    window_id: u32 = 0,
+    draw: ?*c.XftDraw = null,
+    x: i16 = 0,
+    width: u16 = 0,
+
+    fn getOutputName(self: *const BarWindow) []const u8 {
+        return self.output_name[0..self.output_name_len];
+    }
+};
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -65,6 +82,7 @@ pub fn main() !void {
     const colormap = c.XDefaultColormap(dpy, screen_num);
     const screen_width: u16 = @intCast(c.XDisplayWidth(dpy, screen_num));
     const screen_height: u16 = @intCast(c.XDisplayHeight(dpy, screen_num));
+    const visual_id: u32 = @intCast(visual.*.visualid);
 
     // Get XCB connection from Xlib
     const conn = c.XGetXCBConnection(dpy) orelse {
@@ -72,74 +90,113 @@ pub fn main() !void {
         return;
     };
 
-    // 2. Create bar window
-    const bar_y: i16 = if (position_top) 0 else @intCast(screen_height - BAR_HEIGHT);
-    const bar_win = c.xcb_generate_id(conn);
-    {
+    // 2. Discover IPC socket (needed before output discovery)
+    var default_path_buf: [256]u8 = undefined;
+    const default_path = ipc.getDefaultSocketPath(&default_path_buf);
+    const sock_path = socket_override orelse
+        (std.posix.getenv("I3SOCK") orelse default_path);
+
+    // 3. Discover outputs via IPC and create per-output bar windows
+    var bars: [MAX_OUTPUTS]BarWindow = undefined;
+    for (&bars) |*b| b.* = .{};
+    var bar_count: usize = 0;
+
+    // Try to discover outputs from the WM
+    discoverOutputs(allocator, sock_path, &bars, &bar_count);
+
+    // Fallback: single screen-wide bar if no outputs discovered
+    if (bar_count == 0) {
+        bars[0] = .{
+            .output_name_len = 7,
+            .x = 0,
+            .width = screen_width,
+        };
+        @memcpy(bars[0].output_name[0..7], "default");
+        bar_count = 1;
+    }
+
+    // Create X windows for each bar
+    const type_atom = internAtom(conn, "_NET_WM_WINDOW_TYPE");
+    const dock_atom = internAtom(conn, "_NET_WM_WINDOW_TYPE_DOCK");
+    const strut_atom = internAtom(conn, "_NET_WM_STRUT_PARTIAL");
+
+    for (bars[0..bar_count]) |*bar| {
+        const bar_y: i16 = if (position_top) 0 else @as(i16, @intCast(screen_height - BAR_HEIGHT));
+        const win_id = c.xcb_generate_id(conn);
+        bar.window_id = win_id;
+
         const values = [_]u32{
             BG_COLOR, // back pixel
-            1,        // override_redirect
+            1, // override_redirect
             c.XCB_EVENT_MASK_EXPOSURE | c.XCB_EVENT_MASK_BUTTON_PRESS,
         };
         _ = c.xcb_create_window(
             conn,
             c.XCB_COPY_FROM_PARENT,
-            bar_win,
+            win_id,
             @intCast(root),
-            0,
+            bar.x,
             bar_y,
-            screen_width,
+            bar.width,
             BAR_HEIGHT,
             0,
             c.XCB_WINDOW_CLASS_INPUT_OUTPUT,
-            @intCast(c.XDefaultVisual(dpy, screen_num).*.visualid),
+            visual_id,
             c.XCB_CW_BACK_PIXEL | c.XCB_CW_OVERRIDE_REDIRECT | c.XCB_CW_EVENT_MASK,
             &values,
         );
-    }
 
-    // Set _NET_WM_WINDOW_TYPE to DOCK
-    {
-        const type_atom = internAtom(conn, "_NET_WM_WINDOW_TYPE");
-        const dock_atom = internAtom(conn, "_NET_WM_WINDOW_TYPE_DOCK");
+        // Set _NET_WM_WINDOW_TYPE to DOCK
         if (type_atom != 0 and dock_atom != 0) {
             const val = [_]u32{dock_atom};
-            _ = c.xcb_change_property(conn, c.XCB_PROP_MODE_REPLACE, bar_win, type_atom, c.XCB_ATOM_ATOM, 32, 1, @ptrCast(&val));
+            _ = c.xcb_change_property(conn, c.XCB_PROP_MODE_REPLACE, win_id, type_atom, c.XCB_ATOM_ATOM, 32, 1, @ptrCast(&val));
         }
-    }
 
-    // Set _NET_WM_STRUT to reserve space
-    {
-        const strut_atom = internAtom(conn, "_NET_WM_STRUT");
+        // Set _NET_WM_STRUT_PARTIAL scoped to this output's x-range
         if (strut_atom != 0) {
-            var strut = [_]u32{ 0, 0, 0, 0 }; // left, right, top, bottom
+            // _NET_WM_STRUT_PARTIAL: left, right, top, bottom,
+            //   left_start_y, left_end_y, right_start_y, right_end_y,
+            //   top_start_x, top_end_x, bottom_start_x, bottom_end_x
+            var strut = [_]u32{0} ** 12;
+            const x_start: u32 = @intCast(@as(u32, @bitCast(@as(i32, bar.x))));
+            const x_end: u32 = x_start + bar.width -| 1;
             if (position_top) {
-                strut[2] = BAR_HEIGHT;
+                strut[2] = BAR_HEIGHT; // top
+                strut[8] = x_start; // top_start_x
+                strut[9] = x_end; // top_end_x
             } else {
-                strut[3] = BAR_HEIGHT;
+                strut[3] = BAR_HEIGHT; // bottom
+                strut[10] = x_start; // bottom_start_x
+                strut[11] = x_end; // bottom_end_x
             }
-            _ = c.xcb_change_property(conn, c.XCB_PROP_MODE_REPLACE, bar_win, strut_atom, c.XCB_ATOM_CARDINAL, 32, 4, @ptrCast(&strut));
+            _ = c.xcb_change_property(conn, c.XCB_PROP_MODE_REPLACE, win_id, strut_atom, c.XCB_ATOM_CARDINAL, 32, 12, @ptrCast(&strut));
         }
+
+        _ = c.xcb_map_window(conn, win_id);
     }
 
-    _ = c.xcb_map_window(conn, bar_win);
     _ = c.xcb_flush(conn);
-
-    // Need to sync Xlib with XCB state
     _ = c.XSync(dpy, 0);
 
-    // 3. Init Xft
+    // 4. Init Xft
     const font = c.XftFontOpenName(dpy, screen_num, FONT_NAME) orelse {
         std.debug.print("zephwm-bar: cannot open font '{s}'\n", .{FONT_NAME});
         return;
     };
     defer c.XftFontClose(dpy, font);
 
-    const draw = c.XftDrawCreate(dpy, bar_win, visual, colormap) orelse {
-        std.debug.print("zephwm-bar: cannot create XftDraw\n", .{});
-        return;
-    };
-    defer c.XftDrawDestroy(draw);
+    // Create XftDraw per bar window
+    for (bars[0..bar_count]) |*bar| {
+        bar.draw = c.XftDrawCreate(dpy, bar.window_id, visual, colormap);
+        if (bar.draw == null) {
+            std.debug.print("zephwm-bar: cannot create XftDraw for output {s}\n", .{bar.getOutputName()});
+        }
+    }
+    defer {
+        for (bars[0..bar_count]) |*bar| {
+            if (bar.draw) |d| c.XftDrawDestroy(d);
+        }
+    }
 
     // Pre-allocate colors
     var fg_color: c.XftColor = undefined;
@@ -152,19 +209,13 @@ pub fn main() !void {
     defer c.XftColorFree(dpy, visual, colormap, &focused_fg);
     defer c.XftColorFree(dpy, visual, colormap, &unfocused_fg);
 
-    // 4. Create GC for filling rectangles
+    // 5. Create GC for filling rectangles (shared across all bar windows, using first bar)
     const gc = c.xcb_generate_id(conn);
     {
         const gc_values = [_]u32{ BG_COLOR, 0 };
-        _ = c.xcb_create_gc(conn, gc, bar_win, c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES, &gc_values);
+        _ = c.xcb_create_gc(conn, gc, bars[0].window_id, c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES, &gc_values);
     }
     defer _ = c.xcb_free_gc(conn, gc);
-
-    // 5. Discover IPC socket
-    var default_path_buf: [256]u8 = undefined;
-    const default_path = ipc.getDefaultSocketPath(&default_path_buf);
-    const sock_path = socket_override orelse
-        (std.posix.getenv("I3SOCK") orelse default_path);
 
     // Status text buffer
     var status_text: [512]u8 = undefined;
@@ -194,14 +245,15 @@ pub fn main() !void {
     }
 
     // Workspace info cache
-    const MaxWorkspaces = 16;
     var ws_names: [MaxWorkspaces][32]u8 = undefined;
     var ws_name_lens: [MaxWorkspaces]u8 = .{0} ** MaxWorkspaces;
     var ws_focused: [MaxWorkspaces]bool = .{false} ** MaxWorkspaces;
     var ws_urgent: [MaxWorkspaces]bool = .{false} ** MaxWorkspaces;
+    var ws_outputs: [MaxWorkspaces][64]u8 = undefined;
+    var ws_output_lens: [MaxWorkspaces]u8 = .{0} ** MaxWorkspaces;
     var ws_count: usize = 0;
 
-    std.debug.print("zephwm-bar v{s} started (ipc: {s})\n", .{ VERSION, sock_path });
+    std.debug.print("zephwm-bar v{s} started (ipc: {s}, outputs: {d})\n", .{ VERSION, sock_path, bar_count });
 
     // 6. Main loop: epoll on XCB fd with 500ms timeout for workspace refresh
     const linux = std.os.linux;
@@ -230,8 +282,10 @@ pub fn main() !void {
 
     var running = true;
     // Initial refresh + draw
-    refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_count);
-    drawBar(conn, dpy, draw, font, gc, bar_win, screen_width, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, ws_count, status_text[0..status_len], &focused_fg, &unfocused_fg, &fg_color);
+    refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, &ws_count);
+    for (bars[0..bar_count]) |*bar| {
+        drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, status_text[0..status_len], &focused_fg, &unfocused_fg, &fg_color);
+    }
 
     while (running) {
         // Wait for X events or 500ms timeout (for workspace refresh)
@@ -251,11 +305,24 @@ pub fn main() !void {
             const response_type = ev.*.response_type & 0x7f;
             switch (response_type) {
                 c.XCB_EXPOSE => {
-                    drawBar(conn, dpy, draw, font, gc, bar_win, screen_width, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, ws_count, status_text[0..status_len], &focused_fg, &unfocused_fg, &fg_color);
+                    const expose_ev: *c.xcb_expose_event_t = @ptrCast(ev);
+                    // Find which bar window was exposed and redraw it
+                    for (bars[0..bar_count]) |*bar| {
+                        if (bar.window_id == expose_ev.window) {
+                            drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, status_text[0..status_len], &focused_fg, &unfocused_fg, &fg_color);
+                            break;
+                        }
+                    }
                 },
                 c.XCB_BUTTON_PRESS => {
                     const bev: *c.xcb_button_press_event_t = @ptrCast(ev);
-                    handleClick(allocator, sock_path, bev.event_x, &ws_names, &ws_name_lens, ws_count, font, dpy);
+                    // Find which bar window was clicked
+                    for (bars[0..bar_count]) |*bar| {
+                        if (bar.window_id == bev.event) {
+                            handleClick(allocator, sock_path, bev.event_x, bar, &ws_names, &ws_name_lens, &ws_outputs, &ws_output_lens, ws_count, font, dpy);
+                            break;
+                        }
+                    }
                 },
                 else => {},
             }
@@ -275,44 +342,129 @@ pub fn main() !void {
         }
 
         // Refresh workspace state on timeout or after processing events
-        refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_count);
-        drawBar(conn, dpy, draw, font, gc, bar_win, screen_width, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, ws_count, status_text[0..status_len], &focused_fg, &unfocused_fg, &fg_color);
+        refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, &ws_count);
+        for (bars[0..bar_count]) |*bar| {
+            drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, status_text[0..status_len], &focused_fg, &unfocused_fg, &fg_color);
+        }
     }
 
     std.debug.print("zephwm-bar shutting down\n", .{});
 }
 
+/// Discover outputs via IPC GET_OUTPUTS and populate bar array.
+fn discoverOutputs(
+    allocator: std.mem.Allocator,
+    sock_path: []const u8,
+    bars: *[MAX_OUTPUTS]BarWindow,
+    bar_count: *usize,
+) void {
+    const response = ipc.sendRequest(allocator, sock_path, .get_outputs, "") orelse return;
+    defer allocator.free(response);
+
+    bar_count.* = 0;
+    var pos: usize = 0;
+    while (pos < response.len and bar_count.* < MAX_OUTPUTS) {
+        // Find next "name":"
+        const name_key = std.mem.indexOf(u8, response[pos..], "\"name\":\"") orelse break;
+        const name_start = pos + name_key + 8;
+        const name_end = std.mem.indexOfScalar(u8, response[name_start..], '"') orelse break;
+        const name = response[name_start .. name_start + name_end];
+
+        // Find "active":true/false
+        const active_key = std.mem.indexOf(u8, response[name_start..], "\"active\":") orelse break;
+        const active_val = response[name_start + active_key + 9 ..];
+        const is_active = std.mem.startsWith(u8, active_val, "true");
+
+        // Find rect: "rect":{"x":...,"y":...,"width":...,"height":...}
+        var out_x: i16 = 0;
+        var out_width: u16 = 0;
+        if (std.mem.indexOf(u8, response[name_start..], "\"rect\":{")) |rect_key| {
+            const rect_start = name_start + rect_key;
+            // Parse x
+            if (std.mem.indexOf(u8, response[rect_start..], "\"x\":")) |x_key| {
+                const x_val_start = rect_start + x_key + 4;
+                const x_val_end = findNumEnd(response, x_val_start);
+                out_x = std.fmt.parseInt(i16, response[x_val_start..x_val_end], 10) catch 0;
+            }
+            // Parse width
+            if (std.mem.indexOf(u8, response[rect_start..], "\"width\":")) |w_key| {
+                const w_val_start = rect_start + w_key + 8;
+                const w_val_end = findNumEnd(response, w_val_start);
+                out_width = std.fmt.parseInt(u16, response[w_val_start..w_val_end], 10) catch 0;
+            }
+        }
+
+        pos = name_start + name_end + 1;
+
+        // Only add active outputs with non-zero width
+        if (!is_active or out_width == 0) continue;
+
+        const idx = bar_count.*;
+        const copy_len = @min(name.len, @as(usize, 64));
+        @memcpy(bars[idx].output_name[0..copy_len], name[0..copy_len]);
+        bars[idx].output_name_len = @intCast(copy_len);
+        bars[idx].x = out_x;
+        bars[idx].width = out_width;
+        bar_count.* += 1;
+    }
+}
+
+/// Find end of a number in JSON (digits, minus sign).
+fn findNumEnd(data: []const u8, start: usize) usize {
+    var i = start;
+    while (i < data.len) : (i += 1) {
+        switch (data[i]) {
+            '0'...'9', '-' => {},
+            else => return i,
+        }
+    }
+    return i;
+}
+
 fn drawBar(
     conn: *c.xcb_connection_t,
     dpy: *c.Display,
-    draw: *c.XftDraw,
+    bar: *const BarWindow,
     font: *c.XftFont,
     gc: u32,
-    bar_win: u32,
-    screen_width: u16,
-    ws_names: *[16][32]u8,
-    ws_name_lens: *[16]u8,
-    ws_focused: *[16]bool,
-    ws_urgent: *[16]bool,
+    ws_names: *[MaxWorkspaces][32]u8,
+    ws_name_lens: *[MaxWorkspaces]u8,
+    ws_focused: *[MaxWorkspaces]bool,
+    ws_urgent: *[MaxWorkspaces]bool,
+    ws_outputs: *[MaxWorkspaces][64]u8,
+    ws_output_lens: *[MaxWorkspaces]u8,
     ws_count: usize,
     status: []const u8,
     focused_fg: *c.XftColor,
     unfocused_fg: *c.XftColor,
     fg_color: *c.XftColor,
 ) void {
+    const draw = bar.draw orelse return;
+    const bar_win = bar.window_id;
+    const bar_width = bar.width;
+    const bar_output = bar.getOutputName();
+
     // Clear background
     const bg_values = [_]u32{BG_COLOR};
     _ = c.xcb_change_gc(conn, gc, c.XCB_GC_FOREGROUND, &bg_values);
-    const rect = [_]c.xcb_rectangle_t{.{ .x = 0, .y = 0, .width = screen_width, .height = BAR_HEIGHT }};
+    const rect = [_]c.xcb_rectangle_t{.{ .x = 0, .y = 0, .width = bar_width, .height = BAR_HEIGHT }};
     _ = c.xcb_poly_fill_rectangle(conn, bar_win, gc, 1, &rect);
 
     const text_y: c_int = @intCast(font.*.ascent + 2);
     var x: u16 = 0;
 
-    // Draw workspace buttons
+    // Draw workspace buttons — only workspaces belonging to this output
     for (0..ws_count) |i| {
         const name_len = ws_name_lens[i];
         if (name_len == 0) continue;
+
+        // Filter by output: show workspace only if it belongs to this bar's output
+        const ws_out_len = ws_output_lens[i];
+        if (ws_out_len > 0) {
+            const ws_out = ws_outputs[i][0..ws_out_len];
+            if (!std.mem.eql(u8, ws_out, bar_output)) continue;
+        }
+
         const name = ws_names[i][0..name_len];
 
         // Calculate button width from text
@@ -341,7 +493,7 @@ fn drawBar(
     if (status.len > 0) {
         var extents: c.XGlyphInfo = undefined;
         c.XftTextExtentsUtf8(dpy, font, status.ptr, @intCast(status.len), &extents);
-        const status_x: c_int = @intCast(screen_width - @as(u16, @intCast(extents.xOff)) - STATUS_PAD);
+        const status_x: c_int = @intCast(bar_width - @as(u16, @intCast(extents.xOff)) - STATUS_PAD);
         c.XftDrawStringUtf8(draw, fg_color, font, status_x, text_y, status.ptr, @intCast(status.len));
     }
 
@@ -353,17 +505,29 @@ fn handleClick(
     allocator: std.mem.Allocator,
     sock_path: []const u8,
     click_x: i16,
-    ws_names: *[16][32]u8,
-    ws_name_lens: *[16]u8,
+    bar: *const BarWindow,
+    ws_names: *[MaxWorkspaces][32]u8,
+    ws_name_lens: *[MaxWorkspaces]u8,
+    ws_outputs: *[MaxWorkspaces][64]u8,
+    ws_output_lens: *[MaxWorkspaces]u8,
     ws_count: usize,
     font: *c.XftFont,
     dpy: *c.Display,
 ) void {
-    // Determine which workspace button was clicked
+    const bar_output = bar.getOutputName();
+    // Determine which workspace button was clicked (only for this output's workspaces)
     var x: u16 = 0;
     for (0..ws_count) |i| {
         const name_len = ws_name_lens[i];
         if (name_len == 0) continue;
+
+        // Filter by output
+        const ws_out_len = ws_output_lens[i];
+        if (ws_out_len > 0) {
+            const ws_out = ws_outputs[i][0..ws_out_len];
+            if (!std.mem.eql(u8, ws_out, bar_output)) continue;
+        }
+
         const name = ws_names[i][0..name_len];
 
         var extents: c.XGlyphInfo = undefined;
@@ -384,10 +548,12 @@ fn handleClick(
 fn refreshWorkspaces(
     allocator: std.mem.Allocator,
     sock_path: []const u8,
-    ws_names: *[16][32]u8,
-    ws_name_lens: *[16]u8,
-    ws_focused: *[16]bool,
-    ws_urgent: *[16]bool,
+    ws_names: *[MaxWorkspaces][32]u8,
+    ws_name_lens: *[MaxWorkspaces]u8,
+    ws_focused: *[MaxWorkspaces]bool,
+    ws_urgent: *[MaxWorkspaces]bool,
+    ws_outputs: *[MaxWorkspaces][64]u8,
+    ws_output_lens: *[MaxWorkspaces]u8,
     ws_count: *usize,
 ) void {
     // Connect to IPC and send GET_WORKSPACES
@@ -397,7 +563,7 @@ fn refreshWorkspaces(
     // Parse JSON response (simple manual parsing)
     ws_count.* = 0;
     var pos: usize = 0;
-    while (pos < response.len and ws_count.* < 16) {
+    while (pos < response.len and ws_count.* < MaxWorkspaces) {
         // Find next "name":"
         const name_key = std.mem.indexOf(u8, response[pos..], "\"name\":\"") orelse break;
         const name_start = pos + name_key + 8;
@@ -416,12 +582,28 @@ fn refreshWorkspaces(
             is_urgent = std.mem.startsWith(u8, urgent_val, "true");
         }
 
+        // Find output
+        var out_name: []const u8 = "";
+        if (std.mem.indexOf(u8, response[name_start..], "\"output\":\"")) |out_key| {
+            const out_start = name_start + out_key + 10;
+            if (std.mem.indexOfScalar(u8, response[out_start..], '"')) |out_end| {
+                out_name = response[out_start .. out_start + out_end];
+            }
+        }
+
         const idx = ws_count.*;
-        const copy_len = @min(name.len, 32);
+        const copy_len = @min(name.len, @as(usize, 32));
         @memcpy(ws_names[idx][0..copy_len], name[0..copy_len]);
         ws_name_lens[idx] = @intCast(copy_len);
         ws_focused[idx] = is_focused;
         ws_urgent[idx] = is_urgent;
+
+        const out_copy_len = @min(out_name.len, @as(usize, 64));
+        if (out_copy_len > 0) {
+            @memcpy(ws_outputs[idx][0..out_copy_len], out_name[0..out_copy_len]);
+        }
+        ws_output_lens[idx] = @intCast(out_copy_len);
+
         ws_count.* += 1;
 
         pos = name_start + name_end + 1;
