@@ -44,7 +44,7 @@ pub fn apply(con: *tree.Container, gap: u32, border: u32) void {
             // Monocle: single child fills entire area, no gap, no border adjustment
             const child = tiling[0];
             child.rect = rect;
-            child.window_rect = shrinkByBorder(rect, border);
+            child.window_rect = child.rect;
             child.dirty = false;
             recurse(child, gap, border);
         },
@@ -91,7 +91,7 @@ fn applyHsplit(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u
         };
 
         child.rect = .{ .x = x, .y = rect.y, .w = w, .h = rect.h };
-        child.window_rect = shrinkByBorder(child.rect, border);
+        child.window_rect = child.rect;
         child.dirty = false;
         recurse(child, gap, border);
 
@@ -127,7 +127,7 @@ fn applyVsplit(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u
         };
 
         child.rect = .{ .x = rect.x, .y = y, .w = rect.w, .h = h };
-        child.window_rect = shrinkByBorder(child.rect, border);
+        child.window_rect = child.rect;
         child.dirty = false;
         recurse(child, gap, border);
 
@@ -143,7 +143,7 @@ fn applyTabbed(children: []*tree.Container, rect: tree.Rect, gap: u32, border: u
 
     for (children) |child| {
         child.rect = child_rect;
-        child.window_rect = shrinkByBorder(child_rect, border);
+        child.window_rect = child_rect;
         child.dirty = false;
         recurse(child, gap, border);
     }
@@ -159,7 +159,7 @@ fn applyStacked(children: []*tree.Container, rect: tree.Rect, gap: u32, border: 
 
     for (children) |child| {
         child.rect = child_rect;
-        child.window_rect = shrinkByBorder(child_rect, border);
+        child.window_rect = child_rect;
         child.dirty = false;
         recurse(child, gap, border);
     }
@@ -170,17 +170,4 @@ fn recurse(child: *tree.Container, gap: u32, border: u32) void {
     if (child.type == .split_con) {
         apply(child, gap, border);
     }
-}
-
-/// Return rect shrunk by `border` pixels on each side.
-fn shrinkByBorder(rect: tree.Rect, border: u32) tree.Rect {
-    if (border == 0) return rect;
-    const b: i32 = @intCast(border);
-    const b2: u32 = border * 2;
-    return .{
-        .x = rect.x + b,
-        .y = rect.y + b,
-        .w = if (rect.w > b2) rect.w - b2 else 0,
-        .h = if (rect.h > b2) rect.h - b2 else 0,
-    };
 }
