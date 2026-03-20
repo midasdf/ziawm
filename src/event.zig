@@ -2036,6 +2036,11 @@ fn executeBorder(ctx: *EventContext, cmd: command_mod.Command) void {
         }
     } else if (std.mem.eql(u8, arg, "normal")) {
         focused.border_style = .normal;
+        if (cmd.args[1]) |width_str| {
+            if (std.fmt.parseInt(i16, width_str, 10)) |w| {
+                focused.border_width_override = w;
+            } else |_| {}
+        }
     } else if (std.mem.eql(u8, arg, "toggle")) {
         focused.border_style = switch (focused.border_style) {
             .none => .pixel,
