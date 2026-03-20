@@ -114,6 +114,64 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
     }
 }
 
+/// Draw a title bar for a border normal window on its own frame.
+pub fn drawNormalTitleBar(conn: *xcb.Connection, con: *tree.Container) void {
+    if (!title_gc_initialized or title_gc == 0) return;
+    const wd = if (con.window) |w| w else return;
+    const frame_id = wd.frame_id;
+    if (frame_id == 0) return;
+
+    const tbh: u16 = tab_bar_height;
+    const text_y_offset: i16 = @intCast(font_ascent + 2);
+
+    // Compute content_w from window_rect and border (same logic as applyWindow)
+    const effective_border: u16 = blk: {
+        if (con.border_style == .none) break :blk 0;
+        if (con.border_width_override >= 0) break :blk @intCast(con.border_width_override);
+        break :blk config_border_px;
+    };
+    const b2: u32 = @as(u32, effective_border) * 2;
+    const r = con.window_rect;
+    const content_w: u16 = @intCast(if (r.w > b2) r.w - b2 else 1);
+
+    const bg: u32 = if (con.is_focused) 0x285577 else 0x333333;
+
+    // Fill title bar background
+    const bg_val = [_]u32{bg};
+    _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_BACKGROUND, &bg_val);
+    _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &bg_val);
+    const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = 0, .y = 0, .width = content_w, .height = tbh }};
+    _ = xcb.c.xcb_poly_fill_rectangle(conn, frame_id, title_gc, 1, &rect);
+
+    // Draw title text with ellipsis
+    const title = wd.title;
+    const max_chars: usize = if (font_char_width > 0 and content_w > 8)
+        @intCast((content_w - 8) / font_char_width)
+    else
+        0;
+    const capped_max: usize = @min(max_chars, 255);
+    if (capped_max > 0) {
+        var buf: [256]u8 = undefined;
+        var text_ptr: [*]const u8 = title.ptr;
+        var text_len: u8 = @intCast(@min(title.len, capped_max));
+
+        // Ellipsis: if title is longer than available space
+        if (title.len > capped_max and capped_max >= 4) {
+            const trunc_len = capped_max - 3;
+            @memcpy(buf[0..trunc_len], title[0..trunc_len]);
+            buf[trunc_len] = '.';
+            buf[trunc_len + 1] = '.';
+            buf[trunc_len + 2] = '.';
+            text_ptr = &buf;
+            text_len = @intCast(capped_max);
+        }
+
+        const text_fg = [_]u32{0xffffff};
+        _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
+        _ = xcb.c.xcb_image_text_8(conn, text_len, frame_id, title_gc, 4, text_y_offset, text_ptr);
+    }
+}
+
 /// Redraw title bars for a tabbed/stacked container. Called from Expose handler.
 pub fn redrawTitleBarsForContainer(conn: *xcb.Connection, con: *tree.Container) void {
     if (!title_gc_initialized or title_gc == 0) return;
@@ -239,6 +297,8 @@ fn applyRecursive(
             var floating_count: usize = 0;
             var fullscreen_buf: [8]*tree.Container = undefined;
             var fullscreen_count: usize = 0;
+            var normal_border_buf: [32]*tree.Container = undefined;
+            var normal_border_count: usize = 0;
 
             var cur = con.children.first;
             while (cur) |child| : (cur = child.next) {
@@ -271,6 +331,23 @@ fn applyRecursive(
                 }
             }
 
+            // Collect border normal windows for deferred title bar drawing
+            {
+                var nc = con.children.first;
+                while (nc) |child| : (nc = child.next) {
+                    if (child.is_floating or child.is_fullscreen != .none) continue;
+                    if (child.type == .window and child.border_style == .normal) {
+                        // Skip if inside tabbed/stacked with >1 children (parent headers take precedence)
+                        if (!hide_unfocused) {
+                            if (normal_border_count < 32) {
+                                normal_border_buf[normal_border_count] = child;
+                                normal_border_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
             // Draw tab bar / stacked headers AFTER frames are configured.
             // Flush first so X server processes configure before we draw.
             if (hide_unfocused and title_gc != 0) {
@@ -278,9 +355,36 @@ fn applyRecursive(
                 drawTitleBars(conn, con);
             }
 
+            // Draw border normal title bars (after flush, before floating)
+            if (normal_border_count > 0 and title_gc != 0) {
+                if (!hide_unfocused) _ = xcb.flush(conn);
+                for (normal_border_buf[0..normal_border_count]) |child| {
+                    drawNormalTitleBar(conn, child);
+                }
+            }
+
             // Render floating children (on top of tiling)
             for (floating_buf[0..floating_count]) |child| {
                 applyRecursive(conn, child, border_focus_color, border_unfocus_color);
+            }
+
+            // Draw border normal title bars on floating windows
+            if (title_gc != 0) {
+                var has_float_normal = false;
+                for (floating_buf[0..floating_count]) |child| {
+                    if (child.type == .window and child.border_style == .normal) {
+                        has_float_normal = true;
+                        break;
+                    }
+                }
+                if (has_float_normal) {
+                    _ = xcb.flush(conn);
+                    for (floating_buf[0..floating_count]) |child| {
+                        if (child.type == .window and child.border_style == .normal) {
+                            drawNormalTitleBar(conn, child);
+                        }
+                    }
+                }
             }
 
             // Render fullscreen children last (on top of everything)
