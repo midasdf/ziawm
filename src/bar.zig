@@ -16,7 +16,7 @@ pub fn spawnBar(status_command: []const u8, position: []const u8) void {
 
     // Build shell command: exec the status command
     // In i3, the bar itself runs and spawns status_command.
-    // Since zephwm-bar is a stub, we just launch status_command directly
+    // Launch zephwm-bar with status_command
     // for use with external bars that read i3bar protocol.
     var cmd_buf: [512]u8 = undefined;
     const cmd_len = @min(status_command.len, cmd_buf.len - 1);
