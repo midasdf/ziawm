@@ -919,6 +919,41 @@ fn handleKeyPress(ctx: *EventContext, ev: *xcb.KeyPressEvent) void {
             std.mem.eql(u8, kb.mode, ctx.current_mode) and
             std.ascii.eqlIgnoreCase(kb.key, name))
         {
+            // Broadcast binding event before executing the command
+            {
+                var bind_buf: [512]u8 = undefined;
+                var bind_fbs = std.io.fixedBufferStream(&bind_buf);
+                const bind_w = bind_fbs.writer();
+                bind_w.writeAll("{\"change\":\"run\",\"binding\":{\"command\":\"") catch {};
+                jsonEscapeWrite(bind_w, kb.command) catch {};
+                bind_w.writeAll("\",\"event_state_mask\":[") catch {};
+                var first_mod = true;
+                if (ev.state & xcb.MOD_MASK_4 != 0) {
+                    if (!first_mod) bind_w.writeAll(",") catch {};
+                    bind_w.writeAll("\"Mod4\"") catch {};
+                    first_mod = false;
+                }
+                if (ev.state & xcb.MOD_MASK_SHIFT != 0) {
+                    if (!first_mod) bind_w.writeAll(",") catch {};
+                    bind_w.writeAll("\"Shift\"") catch {};
+                    first_mod = false;
+                }
+                if (ev.state & xcb.MOD_MASK_CONTROL != 0) {
+                    if (!first_mod) bind_w.writeAll(",") catch {};
+                    bind_w.writeAll("\"Control\"") catch {};
+                    first_mod = false;
+                }
+                if (ev.state & xcb.MOD_MASK_1 != 0) {
+                    if (!first_mod) bind_w.writeAll(",") catch {};
+                    bind_w.writeAll("\"Mod1\"") catch {};
+                    first_mod = false;
+                }
+                bind_w.writeAll("],\"input_type\":\"keyboard\",\"symbol\":\"") catch {};
+                jsonEscapeWrite(bind_w, name) catch {};
+                bind_w.writeAll("\"}}") catch {};
+                const bind_json = bind_fbs.getWritten();
+                if (bind_json.len > 0 and bind_json.len < bind_buf.len) broadcastIpcEvent(ctx, .binding, bind_json);
+            }
             // Parse and execute command
             if (command_mod.parse(kb.command)) |cmd| {
                 executeCommand(ctx, cmd);
@@ -1369,6 +1404,7 @@ pub fn executeCommand(ctx: *EventContext, cmd: command_mod.Command) void {
         .resize => executeResize(ctx, cmd),
         .focus_output => executeFocusOutput(ctx, cmd),
         .nop => {},
+        .sticky => executeSticky(ctx, cmd),
     }
 }
 
@@ -1655,6 +1691,7 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
                     if (cfg.workspace_auto_back_and_forth and ctx.prev_workspace_len > 0) {
                         const prev_name = ctx.prev_workspace[0..ctx.prev_workspace_len];
                         if (workspace.findByName(ctx.tree_root, prev_name)) |prev_ws| {
+                            migrateStickyWindows(current_ws, prev_ws);
                             clearFocusedPath(current_ws);
                             setFocus(ctx, prev_ws);
                             if (prev_ws.children.first) |child| {
@@ -1686,6 +1723,7 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
                 @memcpy(ctx.prev_workspace[0..copy_len], wsd.name[0..copy_len]);
                 ctx.prev_workspace_len = @intCast(copy_len);
             }
+            migrateStickyWindows(current_ws, target_ws);
             clearFocusedPath(current_ws);
         }
 
@@ -1856,6 +1894,53 @@ fn executeFloating(ctx: *EventContext) void {
     const focused = getFocusedContainer(ctx.tree_root) orelse return;
     focused.is_floating = !focused.is_floating;
     relayoutAndRender(ctx);
+}
+
+fn executeSticky(ctx: *EventContext, cmd: command_mod.Command) void {
+    const arg = cmd.args[0] orelse return;
+    const focused = getFocusedContainer(ctx.tree_root) orelse return;
+    // sticky only applies to floating containers
+    if (!focused.is_floating) return;
+    if (std.mem.eql(u8, arg, "enable")) {
+        focused.is_sticky = true;
+    } else if (std.mem.eql(u8, arg, "disable")) {
+        focused.is_sticky = false;
+    } else if (std.mem.eql(u8, arg, "toggle")) {
+        focused.is_sticky = !focused.is_sticky;
+    }
+}
+
+/// Move sticky floating containers from src_ws to dst_ws, adjusting coordinates
+/// for the destination output geometry.
+fn migrateStickyWindows(src_ws: *tree.Container, dst_ws: *tree.Container) void {
+    // Determine output rects for coordinate adjustment
+    const src_out_rect: tree.Rect = if (src_ws.parent) |p| p.rect else src_ws.rect;
+    const dst_out_rect: tree.Rect = if (dst_ws.parent) |p| p.rect else dst_ws.rect;
+
+    var cur = src_ws.children.first;
+    while (cur) |child| {
+        const nxt = child.next; // save next before potential unlink
+        if (child.is_floating and child.is_sticky) {
+            // Compute position relative to src output, apply to dst output
+            const rel_x: i32 = child.rect.x - src_out_rect.x;
+            const rel_y: i32 = child.rect.y - src_out_rect.y;
+            child.unlink();
+            child.parent = dst_ws;
+            dst_ws.children.append(child);
+            child.rect.x = dst_out_rect.x + rel_x;
+            child.rect.y = dst_out_rect.y + rel_y;
+
+            // Clamp to keep window inside destination output bounds
+            const max_x = dst_out_rect.x + @as(i32, @intCast(dst_out_rect.w)) - @as(i32, @intCast(child.rect.w));
+            const max_y = dst_out_rect.y + @as(i32, @intCast(dst_out_rect.h)) - @as(i32, @intCast(child.rect.h));
+            if (child.rect.x < dst_out_rect.x) child.rect.x = dst_out_rect.x;
+            if (child.rect.y < dst_out_rect.y) child.rect.y = dst_out_rect.y;
+            if (child.rect.x > max_x) child.rect.x = max_x;
+            if (child.rect.y > max_y) child.rect.y = max_y;
+            child.window_rect = child.rect;
+        }
+        cur = nxt;
+    }
 }
 
 fn executeFullscreen(ctx: *EventContext) void {

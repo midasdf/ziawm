@@ -128,6 +128,7 @@ pub const Container = struct {
     is_fullscreen: FullscreenMode = .none,
     is_focused: bool = false,
     is_scratchpad: bool = false,
+    is_sticky: bool = false,
     dirty: bool = true,
     marks: [4]?[]const u8 = .{null} ** 4,
     mark_count: u8 = 0,

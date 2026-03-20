@@ -22,6 +22,7 @@ pub const CommandType = enum {
     exit,
     focus_output,
     nop,
+    sticky,
 };
 
 pub const Command = struct {
@@ -219,6 +220,13 @@ pub fn parse(input: []const u8) ?Command {
             }
         }
         return Command{ .type = .mode, .args = .{ rest, null, null, null }, .criteria = crit };
+    }
+
+    // "sticky enable/disable/toggle"
+    if (startsWith(u8, s, "sticky ")) {
+        const rest = trimLeft(s["sticky ".len..]);
+        if (rest.len == 0) return null;
+        return Command{ .type = .sticky, .args = .{ rest, null, null, null }, .criteria = crit };
     }
 
     // Single-word commands
