@@ -229,11 +229,6 @@ fn applyRecursive(
             const hide_unfocused = (con.layout == .tabbed or con.layout == .stacked) and
                 con.children.len() > 1;
 
-            // Draw tab bar / stacked headers if applicable
-            if (hide_unfocused and title_gc != 0) {
-                drawTitleBars(conn, con);
-            }
-
             // Single pass: process tiling, collect floating/fullscreen for deferred rendering
             var floating_buf: [32]*tree.Container = undefined;
             var floating_count: usize = 0;
@@ -269,6 +264,13 @@ fn applyRecursive(
                 } else {
                     applyRecursive(conn, child, border_focus_color, border_unfocus_color);
                 }
+            }
+
+            // Draw tab bar / stacked headers AFTER frames are configured.
+            // Flush first so X server processes configure before we draw.
+            if (hide_unfocused and title_gc != 0) {
+                _ = xcb.flush(conn);
+                drawTitleBars(conn, con);
             }
 
             // Render floating children (on top of tiling)
