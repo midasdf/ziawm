@@ -376,6 +376,9 @@ pub fn updateClientList(ctx: *EventContext) void {
     var iter = ctx.window_map.iterator();
     while (iter.next()) |entry| {
         if (count >= 1024) break;
+        const con = entry.value_ptr.*;
+        const wd = con.window orelse continue;
+        if (entry.key_ptr.* != wd.id) continue; // skip frame_id entries
         ids[count] = entry.key_ptr.*;
         count += 1;
     }
@@ -699,6 +702,9 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
         );
     }
 
+    // Add client to save-set for crash recovery (ICCCM requirement)
+    _ = xcb.c.xcb_change_save_set(ctx.conn, xcb.c.XCB_SET_MODE_INSERT, window);
+
     // Reparent client window into frame
     _ = xcb.c.xcb_reparent_window(ctx.conn, window, frame_id, 0, 0);
 
@@ -825,20 +831,20 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
     if (ev.event == ev.window) return;
 
     const con = findContainerByWindow(ctx, ev.window) orelse return;
+    const wd = con.window orelse return;
+    if (ev.window == wd.frame_id) return; // ignore frame unmap events
 
-    if (con.window) |*wd| {
-        if (wd.pending_unmap > 0) {
-            wd.pending_unmap -= 1;
+    if (con.window) |*wd_ptr| {
+        if (wd_ptr.pending_unmap > 0) {
+            wd_ptr.pending_unmap -= 1;
             return;
         }
     }
 
     // Client-initiated unmap — reparent client back to root, destroy frame
-    if (con.window) |wd| {
-        _ = xcb.c.xcb_reparent_window(ctx.conn, wd.id, ctx.root_window, @intCast(con.rect.x), @intCast(con.rect.y));
-        _ = xcb.c.xcb_destroy_window(ctx.conn, wd.frame_id);
-        unregisterWindow(ctx, wd.frame_id);
-    }
+    _ = xcb.c.xcb_reparent_window(ctx.conn, wd.id, ctx.root_window, @intCast(con.rect.x), @intCast(con.rect.y));
+    _ = xcb.c.xcb_destroy_window(ctx.conn, wd.frame_id);
+    unregisterWindow(ctx, wd.frame_id);
 
     if (con.is_focused) {
         const new_focus = con.next orelse con.prev orelse con.parent;
@@ -2085,9 +2091,11 @@ pub fn unreparentAll(ctx: *EventContext) void {
         if (con.window) |wd| {
             // Only process client window entries (not frame entries) to avoid double-processing
             if (wd.frame_id != 0 and wd.id == entry.key_ptr.*) {
+                _ = xcb.c.xcb_change_save_set(ctx.conn, xcb.c.XCB_SET_MODE_DELETE, wd.id);
                 _ = xcb.c.xcb_reparent_window(ctx.conn, wd.id, ctx.root_window,
                     @intCast(con.rect.x), @intCast(con.rect.y));
                 _ = xcb.mapWindow(ctx.conn, wd.id);
+                _ = xcb.c.xcb_destroy_window(ctx.conn, wd.frame_id);
             }
         }
     }

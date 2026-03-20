@@ -37,6 +37,8 @@ const BarWindow = struct {
     draw: ?*c.XftDraw = null,
     x: i16 = 0,
     width: u16 = 0,
+    output_y: i16 = 0,
+    output_height: u16 = 0,
 
     fn getOutputName(self: *const BarWindow) []const u8 {
         return self.output_name[0..self.output_name_len];
@@ -107,11 +109,12 @@ pub fn main() !void {
     // Fallback: single screen-wide bar if no outputs discovered
     if (bar_count == 0) {
         bars[0] = .{
-            .output_name_len = 7,
+            .output_name_len = 0, // empty = match all outputs
             .x = 0,
             .width = screen_width,
+            .output_y = 0,
+            .output_height = screen_height,
         };
-        @memcpy(bars[0].output_name[0..7], "default");
         bar_count = 1;
     }
 
@@ -121,7 +124,7 @@ pub fn main() !void {
     const strut_atom = internAtom(conn, "_NET_WM_STRUT_PARTIAL");
 
     for (bars[0..bar_count]) |*bar| {
-        const bar_y: i16 = if (position_top) 0 else @as(i16, @intCast(screen_height - BAR_HEIGHT));
+        const bar_y: i16 = if (position_top) bar.output_y else bar.output_y + @as(i16, @intCast(bar.output_height)) - @as(i16, BAR_HEIGHT);
         const win_id = c.xcb_generate_id(conn);
         bar.window_id = win_id;
 
@@ -377,7 +380,9 @@ fn discoverOutputs(
 
         // Find rect: "rect":{"x":...,"y":...,"width":...,"height":...}
         var out_x: i16 = 0;
+        var out_y: i16 = 0;
         var out_width: u16 = 0;
+        var out_height: u16 = 0;
         if (std.mem.indexOf(u8, response[name_start..], "\"rect\":{")) |rect_key| {
             const rect_start = name_start + rect_key;
             // Parse x
@@ -386,11 +391,23 @@ fn discoverOutputs(
                 const x_val_end = findNumEnd(response, x_val_start);
                 out_x = std.fmt.parseInt(i16, response[x_val_start..x_val_end], 10) catch 0;
             }
+            // Parse y
+            if (std.mem.indexOf(u8, response[rect_start..], "\"y\":")) |y_key| {
+                const y_val_start = rect_start + y_key + 4;
+                const y_val_end = findNumEnd(response, y_val_start);
+                out_y = std.fmt.parseInt(i16, response[y_val_start..y_val_end], 10) catch 0;
+            }
             // Parse width
             if (std.mem.indexOf(u8, response[rect_start..], "\"width\":")) |w_key| {
                 const w_val_start = rect_start + w_key + 8;
                 const w_val_end = findNumEnd(response, w_val_start);
                 out_width = std.fmt.parseInt(u16, response[w_val_start..w_val_end], 10) catch 0;
+            }
+            // Parse height
+            if (std.mem.indexOf(u8, response[rect_start..], "\"height\":")) |h_key| {
+                const h_val_start = rect_start + h_key + 9;
+                const h_val_end = findNumEnd(response, h_val_start);
+                out_height = std.fmt.parseInt(u16, response[h_val_start..h_val_end], 10) catch 0;
             }
         }
 
@@ -405,6 +422,8 @@ fn discoverOutputs(
         bars[idx].output_name_len = @intCast(copy_len);
         bars[idx].x = out_x;
         bars[idx].width = out_width;
+        bars[idx].output_y = out_y;
+        bars[idx].output_height = out_height;
         bar_count.* += 1;
     }
 }
@@ -459,10 +478,13 @@ fn drawBar(
         if (name_len == 0) continue;
 
         // Filter by output: show workspace only if it belongs to this bar's output
-        const ws_out_len = ws_output_lens[i];
-        if (ws_out_len > 0) {
-            const ws_out = ws_outputs[i][0..ws_out_len];
-            if (!std.mem.eql(u8, ws_out, bar_output)) continue;
+        // Empty bar_output (len=0) matches all outputs (fallback single-screen mode)
+        if (bar_output.len > 0) {
+            const ws_out_len = ws_output_lens[i];
+            if (ws_out_len > 0) {
+                const ws_out = ws_outputs[i][0..ws_out_len];
+                if (!std.mem.eql(u8, ws_out, bar_output)) continue;
+            }
         }
 
         const name = ws_names[i][0..name_len];
@@ -489,11 +511,13 @@ fn drawBar(
         x += btn_w;
     }
 
-    // Draw status text (right-aligned)
+    // Draw status text (right-aligned, clamped to prevent underflow)
     if (status.len > 0) {
         var extents: c.XGlyphInfo = undefined;
         c.XftTextExtentsUtf8(dpy, font, status.ptr, @intCast(status.len), &extents);
-        const status_x: c_int = @intCast(bar_width - @as(u16, @intCast(extents.xOff)) - STATUS_PAD);
+        const text_width: u16 = @intCast(extents.xOff);
+        const needed = text_width + STATUS_PAD;
+        const status_x: c_int = if (needed >= bar_width) 0 else @intCast(bar_width - needed);
         c.XftDrawStringUtf8(draw, fg_color, font, status_x, text_y, status.ptr, @intCast(status.len));
     }
 
@@ -521,11 +545,13 @@ fn handleClick(
         const name_len = ws_name_lens[i];
         if (name_len == 0) continue;
 
-        // Filter by output
-        const ws_out_len = ws_output_lens[i];
-        if (ws_out_len > 0) {
-            const ws_out = ws_outputs[i][0..ws_out_len];
-            if (!std.mem.eql(u8, ws_out, bar_output)) continue;
+        // Filter by output (empty bar_output matches all)
+        if (bar_output.len > 0) {
+            const ws_out_len = ws_output_lens[i];
+            if (ws_out_len > 0) {
+                const ws_out = ws_outputs[i][0..ws_out_len];
+                if (!std.mem.eql(u8, ws_out, bar_output)) continue;
+            }
         }
 
         const name = ws_names[i][0..name_len];

@@ -128,7 +128,7 @@ Where:
 
 Map/unmap operates on the **frame** (`frame_id`), not the client. Client stays mapped inside its frame. All existing `mapSubtree`/`unmapSubtree` calls in render.zig must use `frame_id` instead of `win_data.id`.
 
-After reparenting, `Container.rect` represents the frame's geometry and `Container.window_rect` represents the client's position within the frame (offset by border and title bar).
+After reparenting, `Container.rect` and `Container.window_rect` hold the same value (borders and title bar offsets are applied by the render phase, not layout). The layout phase no longer shrinks `window_rect` by border width.
 
 **Tabbed/Stacked Title Bars:**
 

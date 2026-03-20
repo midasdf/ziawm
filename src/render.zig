@@ -108,7 +108,7 @@ pub fn redrawTitleBarsForContainer(conn: *xcb.Connection, con: *tree.Container) 
     _ = xcb.flush(conn);
 }
 
-fn ensureTitleGc(conn: *xcb.Connection, root_window: xcb.Window) void {
+pub fn ensureTitleGc(conn: *xcb.Connection, root_window: xcb.Window) void {
     if (title_gc_initialized) return;
     title_gc_initialized = true;
 
@@ -284,14 +284,20 @@ fn applyWindow(
 
     const r = con.window_rect;
 
-    // Determine title bar offset for tabbed/stacked
+    // Determine title bar offset for tabbed/stacked (only for tiling children)
     var title_offset: u16 = 0;
     if (con.parent) |parent| {
-        if ((parent.layout == .tabbed or parent.layout == .stacked) and parent.children.len() > 1) {
-            if (parent.layout == .tabbed) {
-                title_offset = tab_bar_height;
-            } else {
-                title_offset = tab_bar_height * @as(u16, @intCast(parent.children.len()));
+        if (!con.is_floating and con.is_fullscreen == .none) {
+            if ((parent.layout == .tabbed or parent.layout == .stacked) and parent.children.len() > 1) {
+                // Count only visible tiling children (not floating, not fullscreen)
+                var visible_count: u16 = 0;
+                var c = parent.children.first;
+                while (c) |ch| : (c = ch.next) {
+                    if (!ch.is_floating and ch.is_fullscreen == .none) visible_count += 1;
+                }
+                if (visible_count > 1) {
+                    title_offset = if (parent.layout == .tabbed) tab_bar_height else tab_bar_height * visible_count;
+                }
             }
         }
     }
@@ -345,7 +351,6 @@ fn applyWindow(
         _ = xcb.mapWindow(conn, wd.id);
     }
     wd.mapped = true;
-    wd.pending_unmap = 0;
 }
 
 /// Render a fullscreen window: fill entire output, no border, raise above all.
@@ -397,7 +402,6 @@ fn applyFullscreen(conn: *xcb.Connection, con: *tree.Container, parent_con: *tre
         _ = xcb.mapWindow(conn, wd.id);
     }
     wd.mapped = true;
-    wd.pending_unmap = 0;
 }
 
 /// Map all windows in a subtree.
@@ -410,7 +414,6 @@ fn mapSubtree(conn: *xcb.Connection, con: *tree.Container) void {
                 _ = xcb.mapWindow(conn, win_data.id);
             }
             win_data.mapped = true;
-            win_data.pending_unmap = 0;
         }
         return;
     }

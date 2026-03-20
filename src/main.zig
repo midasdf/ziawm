@@ -736,7 +736,10 @@ pub fn main() !void {
         }
     }
 
-    // 11b. Set initial EWMH properties
+    // 11b. Initialize font/title GC early so tab_bar_height is correct from first layout
+    render.ensureTitleGc(conn, root_window);
+
+    // 11c. Set initial EWMH properties
     event.updateClientList(&ctx);
     event.updateNumberOfDesktops(&ctx);
     event.updateCurrentDesktop(&ctx);
