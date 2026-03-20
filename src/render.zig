@@ -334,11 +334,17 @@ fn applyWindow(
             if (con.border_width_override >= 0) break :blk @intCast(con.border_width_override);
             break :blk config_border_px;
         };
+        // Frame content width/height = allocated rect minus borders on both sides.
+        // X11 draws borders OUTSIDE the configured size, so we shrink the content
+        // so that content + 2*border fits within the layout-allocated rect.
+        const b2: u32 = @as(u32, effective_border) * 2;
+        const content_w: u32 = if (r.w > b2) r.w - b2 else 1;
+        const content_h: u32 = if (frame_h > b2) frame_h - b2 else 1;
         const values = [_]u32{
             @bitCast(r.x),
             @bitCast(frame_y),
-            if (r.w > 0) r.w else 1,
-            if (frame_h > 0) frame_h else 1,
+            content_w,
+            content_h,
             @as(u32, effective_border),
         };
         const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
@@ -346,12 +352,14 @@ fn applyWindow(
             xcb.CONFIG_WINDOW_BORDER_WIDTH;
         _ = xcb.configureWindow(conn, frame_id, mask, &values);
 
-        // Configure client inside frame (no border on client — border is on frame)
+        // Configure client inside frame (fills frame content area)
+        const client_w: u32 = content_w;
+        const client_h: u32 = if (content_h > @as(u32, title_offset)) content_h - @as(u32, title_offset) else 1;
         const client_values = [_]u32{
             0, // x = 0 inside frame
             @as(u32, title_offset), // y = below title bar
-            if (r.w > 0) r.w else 1,
-            if (r.h > 0) r.h else 1,
+            client_w,
+            client_h,
         };
         const client_mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
             xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
