@@ -240,6 +240,26 @@ test "parse workspace NAME" {
     try std.testing.expectEqualStrings("dev", cmd.args[0].?);
 }
 
+// ---- sticky ----
+
+test "parse sticky enable" {
+    const cmd = command.parse("sticky enable") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.sticky, cmd.type);
+    try std.testing.expectEqualStrings("enable", cmd.args[0].?);
+}
+
+test "parse sticky disable" {
+    const cmd = command.parse("sticky disable") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.sticky, cmd.type);
+    try std.testing.expectEqualStrings("disable", cmd.args[0].?);
+}
+
+test "parse sticky toggle" {
+    const cmd = command.parse("sticky toggle") orelse return error.ParseFailed;
+    try std.testing.expectEqual(command.CommandType.sticky, cmd.type);
+    try std.testing.expectEqualStrings("toggle", cmd.args[0].?);
+}
+
 // ---- invalid ----
 
 test "parse invalid returns null" {
