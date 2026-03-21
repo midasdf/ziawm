@@ -191,6 +191,7 @@ test "window_rect equals rect (borders handled by frame window)" {
     defer ws.destroy(alloc);
 
     const child = try Container.create(alloc, .window);
+    child.border_style = .pixel; // pixel border: no title bar adjustment
     ws.appendChild(child);
 
     layout.apply(ws, 0, 2);

@@ -16,6 +16,40 @@ var font_char_width: u16 = 6;
 /// Dynamically computed from font metrics. Exported for layout.zig.
 pub var tab_bar_height: u16 = 16;
 
+/// i3 default title bar colors
+const COLOR_FOCUSED_BG: u32 = 0x285577;
+const COLOR_UNFOCUSED_BG: u32 = 0x222222;
+const COLOR_FOCUSED_TEXT: u32 = 0xffffff;
+const COLOR_UNFOCUSED_TEXT: u32 = 0x888888;
+
+/// Draw title text with ellipsis truncation on a drawable window.
+fn drawTitleText(conn: *xcb.Connection, drawable: u32, x: i16, y: i16, title: []const u8, max_width: u16, is_focused: bool) void {
+    const max_chars: usize = if (font_char_width > 0 and max_width > 8)
+        @intCast((max_width - 8) / font_char_width)
+    else
+        0;
+    const capped_max: usize = @min(max_chars, 255);
+    if (capped_max == 0) return;
+
+    var buf: [256]u8 = undefined;
+    var text_ptr: [*]const u8 = title.ptr;
+    var text_len: u8 = @intCast(@min(title.len, capped_max));
+
+    if (title.len > capped_max and capped_max >= 4) {
+        const trunc_len = capped_max - 3;
+        @memcpy(buf[0..trunc_len], title[0..trunc_len]);
+        buf[trunc_len] = '.';
+        buf[trunc_len + 1] = '.';
+        buf[trunc_len + 2] = '.';
+        text_ptr = &buf;
+        text_len = @intCast(capped_max);
+    }
+
+    const text_fg = [_]u32{if (is_focused) COLOR_FOCUSED_TEXT else COLOR_UNFOCUSED_TEXT};
+    _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
+    _ = xcb.c.xcb_image_text_8(conn, text_len, drawable, title_gc, x, y, text_ptr);
+}
+
 /// Draw title bars for tabbed or stacked layout containers.
 /// Draws on the visible (focused) child's frame window.
 fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
@@ -64,40 +98,15 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
             else
                 base_tab_w;
 
-            const bg = if (child.is_focused) @as(u32, 0x285577) else @as(u32, 0x222222);
+            const bg = if (child.is_focused) COLOR_FOCUSED_BG else COLOR_UNFOCUSED_BG;
             const bg_val = [_]u32{bg};
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_BACKGROUND, &bg_val);
-            const fg_val = [_]u32{bg};
-            _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &fg_val);
+            _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &bg_val);
             const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = x, .y = 0, .width = tab_w, .height = tbh }};
             _ = xcb.c.xcb_poly_fill_rectangle(conn, frame_win, title_gc, 1, &rect);
 
             const title = if (child.window) |wd| wd.title else if (child.workspace) |wsd| wsd.name else "?";
-            // Truncate to fit tab width (leave 8px padding), with ellipsis
-            const max_chars: usize = if (font_char_width > 0 and tab_w > 8)
-                @intCast((tab_w - 8) / font_char_width)
-            else
-                0;
-            const capped_max: usize = @min(max_chars, 255);
-            if (capped_max > 0) {
-                var buf: [256]u8 = undefined;
-                var text_ptr: [*]const u8 = title.ptr;
-                var text_len: u8 = @intCast(@min(title.len, capped_max));
-
-                if (title.len > capped_max and capped_max >= 4) {
-                    const trunc_len = capped_max - 3;
-                    @memcpy(buf[0..trunc_len], title[0..trunc_len]);
-                    buf[trunc_len] = '.';
-                    buf[trunc_len + 1] = '.';
-                    buf[trunc_len + 2] = '.';
-                    text_ptr = &buf;
-                    text_len = @intCast(capped_max);
-                }
-
-                const text_fg = [_]u32{if (child.is_focused) @as(u32, 0xffffff) else @as(u32, 0x888888)};
-                _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
-                _ = xcb.c.xcb_image_text_8(conn, text_len, frame_win, title_gc, x + 4, text_y_offset, text_ptr);
-            }
+            drawTitleText(conn, frame_win, x + 4, text_y_offset, title, tab_w, child.is_focused);
             x += @intCast(tab_w);
         }
     } else if (con.layout == .stacked) {
@@ -105,7 +114,7 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
         var cur = con.children.first;
         while (cur) |child| : (cur = child.next) {
             if (child.is_floating) continue;
-            const bg = if (child.is_focused) @as(u32, 0x285577) else @as(u32, 0x222222);
+            const bg = if (child.is_focused) COLOR_FOCUSED_BG else COLOR_UNFOCUSED_BG;
             const bg_val = [_]u32{bg};
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_BACKGROUND, &bg_val);
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &bg_val);
@@ -113,30 +122,7 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
             _ = xcb.c.xcb_poly_fill_rectangle(conn, frame_win, title_gc, 1, &rect);
 
             const title = if (child.window) |wd| wd.title else if (child.workspace) |wsd| wsd.name else "?";
-            const max_chars: usize = if (font_char_width > 0 and r.w > 8)
-                @intCast((r.w - 8) / font_char_width)
-            else
-                0;
-            const capped_max: usize = @min(max_chars, 255);
-            if (capped_max > 0) {
-                var buf: [256]u8 = undefined;
-                var text_ptr: [*]const u8 = title.ptr;
-                var text_len: u8 = @intCast(@min(title.len, capped_max));
-
-                if (title.len > capped_max and capped_max >= 4) {
-                    const trunc_len = capped_max - 3;
-                    @memcpy(buf[0..trunc_len], title[0..trunc_len]);
-                    buf[trunc_len] = '.';
-                    buf[trunc_len + 1] = '.';
-                    buf[trunc_len + 2] = '.';
-                    text_ptr = &buf;
-                    text_len = @intCast(capped_max);
-                }
-
-                const text_fg = [_]u32{if (child.is_focused) @as(u32, 0xffffff) else @as(u32, 0x888888)};
-                _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
-                _ = xcb.c.xcb_image_text_8(conn, text_len, frame_win, title_gc, 4, y + text_y_offset, text_ptr);
-            }
+            drawTitleText(conn, frame_win, 4, y + text_y_offset, title, @intCast(r.w), child.is_focused);
             y += @intCast(tbh);
         }
     }
@@ -162,7 +148,7 @@ pub fn drawNormalTitleBar(conn: *xcb.Connection, con: *tree.Container) void {
     const r = con.window_rect;
     const content_w: u16 = @intCast(if (r.w > b2) r.w - b2 else 1);
 
-    const bg: u32 = if (con.is_focused) 0x285577 else 0x222222;
+    const bg: u32 = if (con.is_focused) COLOR_FOCUSED_BG else COLOR_UNFOCUSED_BG;
 
     // Fill title bar background
     const bg_val = [_]u32{bg};
@@ -171,33 +157,7 @@ pub fn drawNormalTitleBar(conn: *xcb.Connection, con: *tree.Container) void {
     const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = 0, .y = 0, .width = content_w, .height = tbh }};
     _ = xcb.c.xcb_poly_fill_rectangle(conn, frame_id, title_gc, 1, &rect);
 
-    // Draw title text with ellipsis
-    const title = wd.title;
-    const max_chars: usize = if (font_char_width > 0 and content_w > 8)
-        @intCast((content_w - 8) / font_char_width)
-    else
-        0;
-    const capped_max: usize = @min(max_chars, 255);
-    if (capped_max > 0) {
-        var buf: [256]u8 = undefined;
-        var text_ptr: [*]const u8 = title.ptr;
-        var text_len: u8 = @intCast(@min(title.len, capped_max));
-
-        // Ellipsis: if title is longer than available space
-        if (title.len > capped_max and capped_max >= 4) {
-            const trunc_len = capped_max - 3;
-            @memcpy(buf[0..trunc_len], title[0..trunc_len]);
-            buf[trunc_len] = '.';
-            buf[trunc_len + 1] = '.';
-            buf[trunc_len + 2] = '.';
-            text_ptr = &buf;
-            text_len = @intCast(capped_max);
-        }
-
-        const text_fg = [_]u32{if (con.is_focused) @as(u32, 0xffffff) else @as(u32, 0x888888)};
-        _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
-        _ = xcb.c.xcb_image_text_8(conn, text_len, frame_id, title_gc, 4, text_y_offset, text_ptr);
-    }
+    drawTitleText(conn, frame_id, 4, text_y_offset, wd.title, content_w, con.is_focused);
 }
 
 /// Redraw title bars for a tabbed/stacked container. Called from Expose handler.

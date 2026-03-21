@@ -30,8 +30,8 @@ Out of scope: stacked header limit, floating window clamping, bindcode.
 └────────────────────────────────┘      or config default
 ```
 
-- Title bar background: focused = `0x285577`, unfocused = `0x333333`
-- Title bar text: white (`0xffffff`), left-aligned with 4px padding
+- Title bar background: focused = `0x285577`, unfocused = `0x222222` (i3 client.unfocused)
+- Title bar text: focused = `0xffffff`, unfocused = `0x888888` (i3 client.unfocused), left-aligned with 4px padding
 - Title bar height: same as tabbed/stacked headers (`tab_bar_height`)
 - Border drawn by X11 on all 4 sides of the frame (same as `border pixel`)
 - Title bar background does NOT extend under X11 border pixels — it fills only the content area
