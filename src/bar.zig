@@ -4,6 +4,9 @@ const std = @import("std");
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 extern "c" fn setsid() std.c.pid_t;
 
+/// PID of the spawned bar process (0 if none). Used for cleanup on exit.
+var bar_pid: std.posix.pid_t = 0;
+
 /// Spawn the bar process (e.g. i3bar, polybar, lemonbar).
 /// The bar is launched as a detached child process with the I3SOCK
 /// environment variable set so it can connect to zephwm's IPC.
@@ -14,10 +17,9 @@ pub fn spawnBar(status_command: []const u8, position: []const u8) void {
 
     if (status_command.len == 0) return;
 
-    // Build shell command: exec the status command
-    // In i3, the bar itself runs and spawns status_command.
-    // Launch zephwm-bar with status_command
-    // for use with external bars that read i3bar protocol.
+    // Kill previous bar if any
+    killBar();
+
     var cmd_buf: [512]u8 = undefined;
     const cmd_len = @min(status_command.len, cmd_buf.len - 1);
     @memcpy(cmd_buf[0..cmd_len], status_command[0..cmd_len]);
@@ -43,6 +45,15 @@ pub fn spawnBar(status_command: []const u8, position: []const u8) void {
         _ = execvp("/bin/sh", &argv);
         std.c._exit(1);
     }
-    // Parent: bar runs in background, reaped by SIGCHLD handler
-    std.debug.print("zephwm: spawned bar process (pid {d})\n", .{pid});
+    bar_pid = pid;
+}
+
+/// Kill the bar process and its children. Called on WM exit and before respawn.
+pub fn killBar() void {
+    if (bar_pid > 0) {
+        // Kill the entire process group (setsid made bar the group leader)
+        std.posix.kill(-bar_pid, std.posix.SIG.TERM) catch {};
+        std.posix.kill(bar_pid, std.posix.SIG.TERM) catch {};
+        bar_pid = 0;
+    }
 }

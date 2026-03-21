@@ -915,5 +915,8 @@ pub fn main() !void {
     ctx.window_map.deinit(allocator);
     tree_json_buf.deinit(allocator);
 
+    // Kill bar process before exit
+    bar.killBar();
+
     std.debug.print("zephwm shutting down\n", .{});
 }

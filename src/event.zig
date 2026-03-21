@@ -919,10 +919,10 @@ fn handleKeyPress(ctx: *EventContext, ev: *xcb.KeyPressEvent) void {
 
     // Build modifier bitmask from event state
     var mods: u8 = 0;
-    if (ev.state & xcb.MOD_MASK_4 != 0) mods |= config_mod.MOD_SUPER;
-    if (ev.state & xcb.MOD_MASK_SHIFT != 0) mods |= config_mod.MOD_SHIFT;
-    if (ev.state & xcb.MOD_MASK_CONTROL != 0) mods |= config_mod.MOD_CTRL;
-    if (ev.state & xcb.MOD_MASK_1 != 0) mods |= config_mod.MOD_ALT;
+    if ((ev.state & xcb.MOD_MASK_4) != 0) mods |= config_mod.MOD_SUPER;
+    if ((ev.state & xcb.MOD_MASK_SHIFT) != 0) mods |= config_mod.MOD_SHIFT;
+    if ((ev.state & xcb.MOD_MASK_CONTROL) != 0) mods |= config_mod.MOD_CTRL;
+    if ((ev.state & xcb.MOD_MASK_1) != 0) mods |= config_mod.MOD_ALT;
 
     // Look up matching keybind
     for (cfg.keybinds.items) |kb| {
@@ -939,22 +939,22 @@ fn handleKeyPress(ctx: *EventContext, ev: *xcb.KeyPressEvent) void {
                 jsonEscapeWrite(bind_w, kb.command) catch {};
                 bind_w.writeAll("\",\"event_state_mask\":[") catch {};
                 var first_mod = true;
-                if (ev.state & xcb.MOD_MASK_4 != 0) {
+                if ((ev.state & xcb.MOD_MASK_4) != 0) {
                     if (!first_mod) bind_w.writeAll(",") catch {};
                     bind_w.writeAll("\"Mod4\"") catch {};
                     first_mod = false;
                 }
-                if (ev.state & xcb.MOD_MASK_SHIFT != 0) {
+                if ((ev.state & xcb.MOD_MASK_SHIFT) != 0) {
                     if (!first_mod) bind_w.writeAll(",") catch {};
                     bind_w.writeAll("\"Shift\"") catch {};
                     first_mod = false;
                 }
-                if (ev.state & xcb.MOD_MASK_CONTROL != 0) {
+                if ((ev.state & xcb.MOD_MASK_CONTROL) != 0) {
                     if (!first_mod) bind_w.writeAll(",") catch {};
                     bind_w.writeAll("\"Control\"") catch {};
                     first_mod = false;
                 }
-                if (ev.state & xcb.MOD_MASK_1 != 0) {
+                if ((ev.state & xcb.MOD_MASK_1) != 0) {
                     if (!first_mod) bind_w.writeAll(",") catch {};
                     bind_w.writeAll("\"Mod1\"") catch {};
                     first_mod = false;
@@ -995,7 +995,7 @@ fn handleButtonPress(ctx: *EventContext, ev: *xcb.ButtonPressEvent) void {
     setFocus(ctx, con);
 
     // Check for floating_modifier (Mod4) + button for drag move/resize
-    if (ev.state & xcb.MOD_MASK_4 != 0) {
+    if ((ev.state & xcb.MOD_MASK_4) != 0) {
         if (con.is_floating and (ev.detail == 1 or ev.detail == 3)) {
             // Start drag: Button1=move, Button3=resize
             ctx.drag_window = con;
@@ -1156,39 +1156,39 @@ fn handleConfigureRequest(ctx: *EventContext, ev: *xcb.ConfigureRequestEvent) vo
             var req_w: u32 = c.rect.w;
             var req_h: u32 = c.rect.h;
 
-            if (ev.value_mask & xcb.CONFIG_WINDOW_X != 0) {
+            if ((ev.value_mask & xcb.CONFIG_WINDOW_X) != 0) {
                 frame_values[fi] = @bitCast(@as(i32, ev.x));
                 frame_mask |= xcb.CONFIG_WINDOW_X;
                 fi += 1;
             }
-            if (ev.value_mask & xcb.CONFIG_WINDOW_Y != 0) {
+            if ((ev.value_mask & xcb.CONFIG_WINDOW_Y) != 0) {
                 frame_values[fi] = @bitCast(@as(i32, ev.y));
                 frame_mask |= xcb.CONFIG_WINDOW_Y;
                 fi += 1;
             }
-            if (ev.value_mask & xcb.CONFIG_WINDOW_WIDTH != 0) {
+            if ((ev.value_mask & xcb.CONFIG_WINDOW_WIDTH) != 0) {
                 req_w = @intCast(ev.width);
                 frame_values[fi] = req_w;
                 frame_mask |= xcb.CONFIG_WINDOW_WIDTH;
                 fi += 1;
             }
-            if (ev.value_mask & xcb.CONFIG_WINDOW_HEIGHT != 0) {
+            if ((ev.value_mask & xcb.CONFIG_WINDOW_HEIGHT) != 0) {
                 req_h = @intCast(ev.height);
                 frame_values[fi] = req_h;
                 frame_mask |= xcb.CONFIG_WINDOW_HEIGHT;
                 fi += 1;
             }
-            if (ev.value_mask & xcb.CONFIG_WINDOW_BORDER_WIDTH != 0) {
+            if ((ev.value_mask & xcb.CONFIG_WINDOW_BORDER_WIDTH) != 0) {
                 frame_values[fi] = @intCast(ev.border_width);
                 frame_mask |= xcb.CONFIG_WINDOW_BORDER_WIDTH;
                 fi += 1;
             }
-            if (ev.value_mask & xcb.CONFIG_WINDOW_SIBLING != 0) {
+            if ((ev.value_mask & xcb.CONFIG_WINDOW_SIBLING) != 0) {
                 frame_values[fi] = ev.sibling;
                 frame_mask |= xcb.CONFIG_WINDOW_SIBLING;
                 fi += 1;
             }
-            if (ev.value_mask & xcb.CONFIG_WINDOW_STACK_MODE != 0) {
+            if ((ev.value_mask & xcb.CONFIG_WINDOW_STACK_MODE) != 0) {
                 frame_values[fi] = @intCast(ev.stack_mode);
                 frame_mask |= xcb.CONFIG_WINDOW_STACK_MODE;
                 fi += 1;
@@ -1211,37 +1211,37 @@ fn handleConfigureRequest(ctx: *EventContext, ev: *xcb.ConfigureRequestEvent) vo
             var i: usize = 0;
             var mask: u16 = 0;
 
-            if (ev.value_mask & xcb.CONFIG_WINDOW_X != 0) {
+            if ((ev.value_mask & xcb.CONFIG_WINDOW_X) != 0) {
                 values[i] = @bitCast(@as(i32, ev.x));
                 mask |= xcb.CONFIG_WINDOW_X;
                 i += 1;
             }
-            if (ev.value_mask & xcb.CONFIG_WINDOW_Y != 0) {
+            if ((ev.value_mask & xcb.CONFIG_WINDOW_Y) != 0) {
                 values[i] = @bitCast(@as(i32, ev.y));
                 mask |= xcb.CONFIG_WINDOW_Y;
                 i += 1;
             }
-            if (ev.value_mask & xcb.CONFIG_WINDOW_WIDTH != 0) {
+            if ((ev.value_mask & xcb.CONFIG_WINDOW_WIDTH) != 0) {
                 values[i] = @intCast(ev.width);
                 mask |= xcb.CONFIG_WINDOW_WIDTH;
                 i += 1;
             }
-            if (ev.value_mask & xcb.CONFIG_WINDOW_HEIGHT != 0) {
+            if ((ev.value_mask & xcb.CONFIG_WINDOW_HEIGHT) != 0) {
                 values[i] = @intCast(ev.height);
                 mask |= xcb.CONFIG_WINDOW_HEIGHT;
                 i += 1;
             }
-            if (ev.value_mask & xcb.CONFIG_WINDOW_BORDER_WIDTH != 0) {
+            if ((ev.value_mask & xcb.CONFIG_WINDOW_BORDER_WIDTH) != 0) {
                 values[i] = @intCast(ev.border_width);
                 mask |= xcb.CONFIG_WINDOW_BORDER_WIDTH;
                 i += 1;
             }
-            if (ev.value_mask & xcb.CONFIG_WINDOW_SIBLING != 0) {
+            if ((ev.value_mask & xcb.CONFIG_WINDOW_SIBLING) != 0) {
                 values[i] = ev.sibling;
                 mask |= xcb.CONFIG_WINDOW_SIBLING;
                 i += 1;
             }
-            if (ev.value_mask & xcb.CONFIG_WINDOW_STACK_MODE != 0) {
+            if ((ev.value_mask & xcb.CONFIG_WINDOW_STACK_MODE) != 0) {
                 values[i] = @intCast(ev.stack_mode);
                 mask |= xcb.CONFIG_WINDOW_STACK_MODE;
                 i += 1;
@@ -2426,7 +2426,11 @@ fn executeMode(ctx: *EventContext, cmd: command_mod.Command) void {
         ctx.allocator.free(ctx.current_mode);
     }
     ctx.current_mode = duped;
-    std.debug.print("zephwm: switched to mode \"{s}\"\n", .{duped});
+
+    // Re-grab keys for the new mode
+    if (ctx.config) |cfg| {
+        grabKeys(ctx, cfg);
+    }
 
     // Broadcast mode event (with JSON-escaped name)
     var ev_buf: [128]u8 = undefined;
@@ -2448,6 +2452,9 @@ pub fn grabKeys(ctx: *EventContext, cfg: *const config_mod.Config) void {
     _ = xcb.ungrabKey(ctx.conn, xcb.GRAB_ANY, ctx.root_window, xcb.MOD_MASK_ANY);
 
     for (cfg.keybinds.items) |kb| {
+        // Only grab keys for the current mode
+        if (!std.mem.eql(u8, kb.mode, ctx.current_mode)) continue;
+
         // Convert key name to keycode
         const keysym = nameToKeysym(kb.key);
         if (keysym == 0) continue;
@@ -2459,10 +2466,10 @@ pub fn grabKeys(ctx: *EventContext, cfg: *const config_mod.Config) void {
 
         // Convert modifier bitmask to X11 modifiers
         var xmods: u16 = 0;
-        if (kb.modifiers & config_mod.MOD_SUPER != 0) xmods |= xcb.MOD_MASK_4;
-        if (kb.modifiers & config_mod.MOD_SHIFT != 0) xmods |= xcb.MOD_MASK_SHIFT;
-        if (kb.modifiers & config_mod.MOD_CTRL != 0) xmods |= xcb.MOD_MASK_CONTROL;
-        if (kb.modifiers & config_mod.MOD_ALT != 0) xmods |= xcb.MOD_MASK_1;
+        if ((kb.modifiers & config_mod.MOD_SUPER) != 0) xmods |= xcb.MOD_MASK_4;
+        if ((kb.modifiers & config_mod.MOD_SHIFT) != 0) xmods |= xcb.MOD_MASK_SHIFT;
+        if ((kb.modifiers & config_mod.MOD_CTRL) != 0) xmods |= xcb.MOD_MASK_CONTROL;
+        if ((kb.modifiers & config_mod.MOD_ALT) != 0) xmods |= xcb.MOD_MASK_1;
 
         // Grab with and without Lock/NumLock
         _ = xcb.grabKey(ctx.conn, 1, ctx.root_window, xmods, keycode, xcb.GRAB_MODE_ASYNC, xcb.GRAB_MODE_ASYNC);
@@ -2470,7 +2477,6 @@ pub fn grabKeys(ctx: *EventContext, cfg: *const config_mod.Config) void {
         _ = xcb.grabKey(ctx.conn, 1, ctx.root_window, xmods | xcb.MOD_MASK_2, keycode, xcb.GRAB_MODE_ASYNC, xcb.GRAB_MODE_ASYNC);
         _ = xcb.grabKey(ctx.conn, 1, ctx.root_window, xmods | xcb.MOD_MASK_LOCK | xcb.MOD_MASK_2, keycode, xcb.GRAB_MODE_ASYNC, xcb.GRAB_MODE_ASYNC);
     }
-
 
 }
 
