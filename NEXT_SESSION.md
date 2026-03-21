@@ -3,7 +3,7 @@
 ## What is zephwm?
 i3-compatible tiling WM written in Zig. ~7,500 LOC (src + bar), 3 binaries (zephwm, zephwm-msg, zephwm-bar). Target: HackberryPi Zero (RPi Zero 2W, 512MB RAM). All tests pass (~700+ tests across 7 suites), zero memory leaks.
 
-## What's done (v0.3.2)
+## What's done (v0.4.0)
 - **Frame windows**: full X11 reparenting with save-set for crash recovery, ICCCM-compliant unreparent on shutdown/restart
 - **Font detection**: 4-font fallback (fixed → misc-fixed-semicondensed → misc-fixed-normal → cursor) with xcb_query_font metrics
 - **Per-output bar**: one bar window per monitor, output-scoped _NET_WM_STRUT_PARTIAL, per-bar workspace filtering
@@ -18,6 +18,12 @@ i3-compatible tiling WM written in Zig. ~7,500 LOC (src + bar), 3 binaries (zeph
 - **Default border normal**: new windows default to border normal 2 (matching i3)
 - **Config**: `default_border normal/pixel/none [N]` fully supported
 - **Docker i3 comparison**: compare_i3.sh for pixel-level visual comparison against real i3
+- **Config-driven colors**: `client.focused`/`client.unfocused` bg/text reflected in title bars, reload-aware
+- **`client.focused_inactive`**: parsed with border/bg/text colors
+- **`hide_edge_borders`**: none/vertical/horizontal/both/smart, hides border on sole tiling window
+- **Scratchpad fix**: move scratchpad now correctly unmaps the window
+- **Perf**: eliminated redundant xcb_flush in render, O(n²)→O(n) tabbed visibility, merged iterations
+- **Extended tests**: xterm/urxvt/xclock/xeyes, 20-window stress, memory check (4MB RSS)
 - Core tiling: hsplit/vsplit/tabbed/stacked, focus/move/resize, marks, scratchpad
 - Multi-monitor: XRandR 1.5, focus_output, hot-plug, workspace-output config, move workspace to output
 - IPC: all 11 message types, event subscription (workspace/window/mode/binding/output)
@@ -44,6 +50,7 @@ bash test_xephyr_multimon.sh      # 35 multi-monitor tests
 bash test_xephyr_resolutions.sh   # 180 multi-resolution (10 resolutions)
 bash test_xephyr_visual.sh        # 170 pixel verification (10 resolutions)
 bash test_docker_realapps.sh      # 65 Docker tests (xterm + alacritty + kitty, screenshot pixel checks)
+bash test_realapps_extended.sh   # 27 extended tests (urxvt, xclock, xeyes, stress, scratchpad) via Dockerfile.realapps
 ```
 Docker tests use Xvfb inside container (2GB mem limit), no host impact.
 
@@ -56,8 +63,10 @@ Docker tests use Xvfb inside container (2GB mem limit), no host impact.
 
 ### Known limitations
 - kitty/alacritty pixel content checks skipped in Docker (GPU rendering doesn't work with Xvfb)
-- `border toggle` does not reset `border_width_override` when cycling styles (pre-existing)
+- `border toggle` does not reset `border_width_override` when cycling styles
 - `bindcode` not implemented (keysym works for all keys)
+- `focused_inactive` color not yet used in rendering (parsed but not applied)
+- Pango/FreeType fonts not supported (X11 core fonts only, no CJK/emoji)
 
 ## Key architecture
 - Single-threaded epoll loop (main.zig)
@@ -72,4 +81,4 @@ Docker tests use Xvfb inside container (2GB mem limit), no host impact.
 ## Git
 - Repo: git@github.com:midasdf/zephwm.git
 - Branch: master
-- Latest: 5dc9780
+- Latest: d46cab5
