@@ -3,7 +3,7 @@
 ## What is zephwm?
 i3-compatible tiling WM written in Zig. ~7,500 LOC (src + bar), 3 binaries (zephwm, zephwm-msg, zephwm-bar). Target: HackberryPi Zero (RPi Zero 2W, 512MB RAM). All tests pass (~700+ tests across 7 suites), zero memory leaks.
 
-## What's done (v0.3.1)
+## What's done (v0.3.2)
 - **Frame windows**: full X11 reparenting with save-set for crash recovery, ICCCM-compliant unreparent on shutdown/restart
 - **Font detection**: 4-font fallback (fixed → misc-fixed-semicondensed → misc-fixed-normal → cursor) with xcb_query_font metrics
 - **Per-output bar**: one bar window per monitor, output-scoped _NET_WM_STRUT_PARTIAL, per-bar workspace filtering
@@ -14,6 +14,10 @@ i3-compatible tiling WM written in Zig. ~7,500 LOC (src + bar), 3 binaries (zeph
 - **`border normal <width>`**: width argument parsing for both `border normal N` and `border pixel N`
 - **Ellipsis**: long window titles truncated with "..." in tabbed, stacked, and border normal title bars
 - **Frame background fix**: XCB_CW_BACK_PIXMAP=None prevents X server white repaint on resize
+- **i3 default colors**: unfocused title bar bg #222222 + text #888888 (was #333333/#ffffff)
+- **Default border normal**: new windows default to border normal 2 (matching i3)
+- **Config**: `default_border normal/pixel/none [N]` fully supported
+- **Docker i3 comparison**: compare_i3.sh for pixel-level visual comparison against real i3
 - Core tiling: hsplit/vsplit/tabbed/stacked, focus/move/resize, marks, scratchpad
 - Multi-monitor: XRandR 1.5, focus_output, hot-plug, workspace-output config, move workspace to output
 - IPC: all 11 message types, event subscription (workspace/window/mode/binding/output)
