@@ -558,6 +558,13 @@ pub fn main() !void {
     if (config) |cfg| {
         border_focus_color = parseColor(cfg.focused_border);
         border_unfocus_color = parseColor(cfg.unfocused_border);
+        render.setTitleBarColors(
+            parseColor(cfg.focused_bg),
+            parseColor(cfg.focused_text),
+            parseColor(cfg.unfocused_bg),
+            parseColor(cfg.unfocused_text),
+        );
+        render.setHideEdgeBorders(cfg.hide_edge_borders);
     }
 
     // 7b. Allocate key symbols
@@ -864,6 +871,13 @@ pub fn main() !void {
                                 border_unfocus_color = parseColor(cfg.unfocused_border);
                                 ctx.border_focus_color = border_focus_color;
                                 ctx.border_unfocus_color = border_unfocus_color;
+                                render.setTitleBarColors(
+                                    parseColor(cfg.focused_bg),
+                                    parseColor(cfg.focused_text),
+                                    parseColor(cfg.unfocused_bg),
+                                    parseColor(cfg.unfocused_text),
+                                );
+                                render.setHideEdgeBorders(cfg.hide_edge_borders);
                                 ctx.focus_follows_mouse = cfg.focus_follows_mouse;
                                 ctx.config = cfg;
                                 event.grabKeys(&ctx, cfg);

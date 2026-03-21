@@ -46,6 +46,8 @@ pub const WorkspaceOutput = struct {
     output: []const u8,
 };
 
+pub const HideEdgeBorders = enum { none, vertical, horizontal, both, smart };
+
 pub const Config = struct {
     allocator: Allocator,
     variables: StringHashMapManaged([]const u8),
@@ -64,12 +66,19 @@ pub const Config = struct {
     unfocused_border: []const u8 = "#333333",
     unfocused_bg: []const u8 = "#222222",
     unfocused_text: []const u8 = "#888888",
+    focused_inactive_border: []const u8 = "#333333",
+    focused_inactive_bg: []const u8 = "#5f676a",
+    focused_inactive_text: []const u8 = "#ffffff",
+    hide_edge_borders: HideEdgeBorders = .none,
     focused_border_owned: bool = false,
     focused_bg_owned: bool = false,
     focused_text_owned: bool = false,
     unfocused_border_owned: bool = false,
     unfocused_bg_owned: bool = false,
     unfocused_text_owned: bool = false,
+    focused_inactive_border_owned: bool = false,
+    focused_inactive_bg_owned: bool = false,
+    focused_inactive_text_owned: bool = false,
     // Bar
     bar: BarConfig = .{},
     bar_status_command_owned: bool = false,
@@ -414,6 +423,39 @@ pub const Config = struct {
                     cfg.unfocused_text = try allocator.dupe(u8, text_col);
                     cfg.unfocused_text_owned = true;
                 }
+                continue;
+            }
+
+            // client.focused_inactive border bg text [indicator child_border]
+            if (std.mem.startsWith(u8, line, "client.focused_inactive ")) {
+                const rest = std.mem.trim(u8, line["client.focused_inactive ".len..], " \t");
+                var tok_iter = std.mem.tokenizeScalar(u8, rest, ' ');
+                if (tok_iter.next()) |border| {
+                    if (cfg.focused_inactive_border_owned) cfg.allocator.free(cfg.focused_inactive_border);
+                    cfg.focused_inactive_border = try allocator.dupe(u8, border);
+                    cfg.focused_inactive_border_owned = true;
+                }
+                if (tok_iter.next()) |bg| {
+                    if (cfg.focused_inactive_bg_owned) cfg.allocator.free(cfg.focused_inactive_bg);
+                    cfg.focused_inactive_bg = try allocator.dupe(u8, bg);
+                    cfg.focused_inactive_bg_owned = true;
+                }
+                if (tok_iter.next()) |text_col| {
+                    if (cfg.focused_inactive_text_owned) cfg.allocator.free(cfg.focused_inactive_text);
+                    cfg.focused_inactive_text = try allocator.dupe(u8, text_col);
+                    cfg.focused_inactive_text_owned = true;
+                }
+                continue;
+            }
+
+            // hide_edge_borders none|vertical|horizontal|both|smart
+            if (std.mem.startsWith(u8, line, "hide_edge_borders ")) {
+                const val = std.mem.trim(u8, line["hide_edge_borders ".len..], " \t");
+                if (std.mem.eql(u8, val, "vertical")) cfg.hide_edge_borders = .vertical
+                else if (std.mem.eql(u8, val, "horizontal")) cfg.hide_edge_borders = .horizontal
+                else if (std.mem.eql(u8, val, "both")) cfg.hide_edge_borders = .both
+                else if (std.mem.eql(u8, val, "smart")) cfg.hide_edge_borders = .smart
+                else cfg.hide_edge_borders = .none;
                 continue;
             }
 

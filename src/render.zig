@@ -16,11 +16,19 @@ var font_char_width: u16 = 6;
 /// Dynamically computed from font metrics. Exported for layout.zig.
 pub var tab_bar_height: u16 = 16;
 
-/// i3 default title bar colors
-const COLOR_FOCUSED_BG: u32 = 0x285577;
-const COLOR_UNFOCUSED_BG: u32 = 0x222222;
-const COLOR_FOCUSED_TEXT: u32 = 0xffffff;
-const COLOR_UNFOCUSED_TEXT: u32 = 0x888888;
+/// Title bar colors (i3 defaults, configurable via setTitleBarColors)
+var color_focused_bg: u32 = 0x285577;
+var color_unfocused_bg: u32 = 0x222222;
+var color_focused_text: u32 = 0xffffff;
+var color_unfocused_text: u32 = 0x888888;
+
+/// Set title bar colors from config. Called from main.zig after config load.
+pub fn setTitleBarColors(focused_bg: u32, focused_text: u32, unfocused_bg: u32, unfocused_text: u32) void {
+    color_focused_bg = focused_bg;
+    color_unfocused_bg = unfocused_bg;
+    color_focused_text = focused_text;
+    color_unfocused_text = unfocused_text;
+}
 
 /// Draw title text with ellipsis truncation on a drawable window.
 fn drawTitleText(conn: *xcb.Connection, drawable: u32, x: i16, y: i16, title: []const u8, max_width: u16, is_focused: bool) void {
@@ -45,7 +53,7 @@ fn drawTitleText(conn: *xcb.Connection, drawable: u32, x: i16, y: i16, title: []
         text_len = @intCast(capped_max);
     }
 
-    const text_fg = [_]u32{if (is_focused) COLOR_FOCUSED_TEXT else COLOR_UNFOCUSED_TEXT};
+    const text_fg = [_]u32{if (is_focused) color_focused_text else color_unfocused_text};
     _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
     _ = xcb.c.xcb_image_text_8(conn, text_len, drawable, title_gc, x, y, text_ptr);
 }
@@ -98,7 +106,7 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
             else
                 base_tab_w;
 
-            const bg = if (child.is_focused) COLOR_FOCUSED_BG else COLOR_UNFOCUSED_BG;
+            const bg = if (child.is_focused) color_focused_bg else color_unfocused_bg;
             const bg_val = [_]u32{ bg, bg }; // foreground, background (bit order)
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND | xcb.c.XCB_GC_BACKGROUND, &bg_val);
             const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = x, .y = 0, .width = tab_w, .height = tbh }};
@@ -113,7 +121,7 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
         var cur = con.children.first;
         while (cur) |child| : (cur = child.next) {
             if (child.is_floating) continue;
-            const bg = if (child.is_focused) COLOR_FOCUSED_BG else COLOR_UNFOCUSED_BG;
+            const bg = if (child.is_focused) color_focused_bg else color_unfocused_bg;
             const bg_val = [_]u32{ bg, bg }; // foreground, background (bit order)
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND | xcb.c.XCB_GC_BACKGROUND, &bg_val);
             const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = 0, .y = y, .width = @intCast(r.w), .height = tbh }};
@@ -146,7 +154,7 @@ pub fn drawNormalTitleBar(conn: *xcb.Connection, con: *tree.Container) void {
     const r = con.window_rect;
     const content_w: u16 = @intCast(if (r.w > b2) r.w - b2 else 1);
 
-    const bg: u32 = if (con.is_focused) COLOR_FOCUSED_BG else COLOR_UNFOCUSED_BG;
+    const bg: u32 = if (con.is_focused) color_focused_bg else color_unfocused_bg;
 
     // Fill title bar background
     const bg_val = [_]u32{ bg, bg }; // foreground, background (bit order)
@@ -219,6 +227,14 @@ pub fn ensureTitleGc(conn: *xcb.Connection, root_window: xcb.Window) void {
 
 /// Default border width from config, set by applyTree for use in applyWindow.
 var config_border_px: u16 = 1;
+
+/// hide_edge_borders setting from config
+var hide_edge_borders: @import("config.zig").HideEdgeBorders = .none;
+
+/// Set hide_edge_borders from config.
+pub fn setHideEdgeBorders(val: @import("config.zig").HideEdgeBorders) void {
+    hide_edge_borders = val;
+}
 
 pub fn applyTree(
     conn: *xcb.Connection,
@@ -416,6 +432,14 @@ fn applyWindow(
         // Compute effective border width from per-window style
         const effective_border: u16 = blk: {
             if (con.border_style == .none) break :blk 0;
+            // hide_edge_borders: hide borders when window is the only tiling child
+            if (hide_edge_borders != .none and !con.is_floating) {
+                if (con.parent) |parent| {
+                    if (parent.type == .workspace and parent.tilingChildCount() == 1) {
+                        break :blk 0;
+                    }
+                }
+            }
             if (con.border_width_override >= 0) break :blk @intCast(con.border_width_override);
             break :blk config_border_px;
         };
