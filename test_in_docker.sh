@@ -149,7 +149,7 @@ run_terminal_tests() {
     # Tab bar should be #285577 or #333333
     local TAB_OK=0
     for C in $TAB1 $TAB2 $TAB3; do
-        [ "$C" = "285577" ] || [ "$C" = "333333" ] && TAB_OK=$((TAB_OK+1))
+        [ "$C" = "285577" ] || [ "$C" = "222222" ] && TAB_OK=$((TAB_OK+1))
     done
     [ "$TAB_OK" -ge 2 ] && pass "tab bar colors ($TAB_OK/3 correct)" || fail "tab bar ($TAB1 $TAB2 $TAB3)"
     killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
@@ -164,7 +164,7 @@ run_terminal_tests() {
     for Y in $(seq 0 100); do
         local C
         C=$(pixel_hex /tmp/screen.ppm 10 "$Y")
-        if [ "$C" = "285577" ] || [ "$C" = "333333" ]; then
+        if [ "$C" = "285577" ] || [ "$C" = "222222" ]; then
             [ "$C" != "$PREV" ] && REGIONS=$((REGIONS+1))
             PREV="$C"
         fi
@@ -234,8 +234,8 @@ run_terminal_tests() {
     BN_LEFT=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/4)) 4)
     BN_RIGHT=$(pixel_hex /tmp/screen.ppm $((SCREEN_W*3/4)) 4)
     BN_OK=0
-    [ "$BN_LEFT" = "285577" ] || [ "$BN_LEFT" = "333333" ] && BN_OK=$((BN_OK+1))
-    [ "$BN_RIGHT" = "285577" ] || [ "$BN_RIGHT" = "333333" ] && BN_OK=$((BN_OK+1))
+    [ "$BN_LEFT" = "285577" ] || [ "$BN_LEFT" = "222222" ] && BN_OK=$((BN_OK+1))
+    [ "$BN_RIGHT" = "285577" ] || [ "$BN_RIGHT" = "222222" ] && BN_OK=$((BN_OK+1))
     [ "$BN_OK" -ge 2 ] && pass "border normal hsplit ($BN_LEFT/$BN_RIGHT)" || fail "border normal hsplit ($BN_LEFT/$BN_RIGHT)"
     killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
 
@@ -252,7 +252,7 @@ run_terminal_tests() {
         local TOGGLE_NONE
         TOGGLE_NONE=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
         [ "$TOGGLE_NORMAL" = "285577" ] && pass "toggle: normal has title bar" || fail "toggle: normal ($TOGGLE_NORMAL)"
-        [ "$TOGGLE_NONE" != "285577" ] && [ "$TOGGLE_NONE" != "333333" ] && pass "toggle: none has no title bar" || fail "toggle: none ($TOGGLE_NONE)"
+        [ "$TOGGLE_NONE" != "285577" ] && [ "$TOGGLE_NONE" != "222222" ] && pass "toggle: none has no title bar" || fail "toggle: none ($TOGGLE_NONE)"
     else
         run_msg "border toggle"; sleep 0.3
         pass "border toggle (GPU term, pixel skip)"
@@ -298,7 +298,7 @@ run_terminal_tests() {
     screenshot
     local TAB_SUP
     TAB_SUP=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) 4)
-    [ "$TAB_SUP" = "285577" ] || [ "$TAB_SUP" = "333333" ] && pass "tabbed suppresses border normal ($TAB_SUP)" || fail "tabbed suppress ($TAB_SUP)"
+    [ "$TAB_SUP" = "285577" ] || [ "$TAB_SUP" = "222222" ] && pass "tabbed suppresses border normal ($TAB_SUP)" || fail "tabbed suppress ($TAB_SUP)"
     killall "$TERM_NAME" 2>/dev/null || true; sleep 0.5
 
     # -- Title change with border normal --

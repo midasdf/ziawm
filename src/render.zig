@@ -64,7 +64,7 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
             else
                 base_tab_w;
 
-            const bg = if (child.is_focused) @as(u32, 0x285577) else @as(u32, 0x333333);
+            const bg = if (child.is_focused) @as(u32, 0x285577) else @as(u32, 0x222222);
             const bg_val = [_]u32{bg};
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_BACKGROUND, &bg_val);
             const fg_val = [_]u32{bg};
@@ -94,7 +94,7 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
                     text_len = @intCast(capped_max);
                 }
 
-                const text_fg = [_]u32{0xffffff};
+                const text_fg = [_]u32{if (child.is_focused) @as(u32, 0xffffff) else @as(u32, 0x888888)};
                 _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
                 _ = xcb.c.xcb_image_text_8(conn, text_len, frame_win, title_gc, x + 4, text_y_offset, text_ptr);
             }
@@ -105,7 +105,7 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
         var cur = con.children.first;
         while (cur) |child| : (cur = child.next) {
             if (child.is_floating) continue;
-            const bg = if (child.is_focused) @as(u32, 0x285577) else @as(u32, 0x333333);
+            const bg = if (child.is_focused) @as(u32, 0x285577) else @as(u32, 0x222222);
             const bg_val = [_]u32{bg};
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_BACKGROUND, &bg_val);
             _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &bg_val);
@@ -133,7 +133,7 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
                     text_len = @intCast(capped_max);
                 }
 
-                const text_fg = [_]u32{0xffffff};
+                const text_fg = [_]u32{if (child.is_focused) @as(u32, 0xffffff) else @as(u32, 0x888888)};
                 _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
                 _ = xcb.c.xcb_image_text_8(conn, text_len, frame_win, title_gc, 4, y + text_y_offset, text_ptr);
             }
@@ -162,7 +162,7 @@ pub fn drawNormalTitleBar(conn: *xcb.Connection, con: *tree.Container) void {
     const r = con.window_rect;
     const content_w: u16 = @intCast(if (r.w > b2) r.w - b2 else 1);
 
-    const bg: u32 = if (con.is_focused) 0x285577 else 0x333333;
+    const bg: u32 = if (con.is_focused) 0x285577 else 0x222222;
 
     // Fill title bar background
     const bg_val = [_]u32{bg};
@@ -194,7 +194,7 @@ pub fn drawNormalTitleBar(conn: *xcb.Connection, con: *tree.Container) void {
             text_len = @intCast(capped_max);
         }
 
-        const text_fg = [_]u32{0xffffff};
+        const text_fg = [_]u32{if (con.is_focused) @as(u32, 0xffffff) else @as(u32, 0x888888)};
         _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &text_fg);
         _ = xcb.c.xcb_image_text_8(conn, text_len, frame_id, title_gc, 4, text_y_offset, text_ptr);
     }
