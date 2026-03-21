@@ -15,7 +15,13 @@ pub fn apply(con: *tree.Container, gap: u32, border: u32) void {
 
     var cur = con.children.first;
     while (cur) |child| : (cur = child.next) {
-        if (!child.is_floating and child.is_fullscreen == .none) {
+        if (child.is_fullscreen != .none) {
+            // Fullscreen children get the parent rect directly
+            child.rect = con.rect;
+            child.window_rect = con.rect;
+            continue;
+        }
+        if (!child.is_floating) {
             if (count < MAX_TILING_CHILDREN) {
                 tiling[count] = child;
                 count += 1;
@@ -23,15 +29,6 @@ pub fn apply(con: *tree.Container, gap: u32, border: u32) void {
                 log.warn("MAX_TILING_CHILDREN ({d}) exceeded, additional children will not be tiled", .{MAX_TILING_CHILDREN});
                 break;
             }
-        }
-    }
-
-    // Fullscreen children get the parent rect directly (not included in tiling)
-    var fs_cur = con.children.first;
-    while (fs_cur) |child| : (fs_cur = child.next) {
-        if (child.is_fullscreen != .none) {
-            child.rect = con.rect;
-            child.window_rect = con.rect;
         }
     }
 

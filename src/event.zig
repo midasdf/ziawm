@@ -1337,9 +1337,9 @@ fn handlePropertyNotify(ctx: *EventContext, ev: *xcb.PropertyNotifyEvent) void {
                 false;
             if (!suppress) {
                 render.drawNormalTitleBar(ctx.conn, con);
-                _ = xcb.flush(ctx.conn);
             }
         }
+        _ = xcb.flush(ctx.conn);
     }
 
     // Update urgency from WM_HINTS
@@ -1459,9 +1459,9 @@ fn handleExpose(ctx: *EventContext, ev: *xcb.c.xcb_expose_event_t) void {
             false;
         if (!suppress) {
             render.drawNormalTitleBar(ctx.conn, con);
-            _ = xcb.flush(ctx.conn);
         }
     }
+    _ = xcb.flush(ctx.conn);
 }
 
 // --- Command execution ---

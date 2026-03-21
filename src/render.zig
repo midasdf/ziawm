@@ -99,9 +99,8 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
                 base_tab_w;
 
             const bg = if (child.is_focused) COLOR_FOCUSED_BG else COLOR_UNFOCUSED_BG;
-            const bg_val = [_]u32{bg};
-            _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_BACKGROUND, &bg_val);
-            _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &bg_val);
+            const bg_val = [_]u32{ bg, bg }; // foreground, background (bit order)
+            _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND | xcb.c.XCB_GC_BACKGROUND, &bg_val);
             const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = x, .y = 0, .width = tab_w, .height = tbh }};
             _ = xcb.c.xcb_poly_fill_rectangle(conn, frame_win, title_gc, 1, &rect);
 
@@ -115,9 +114,8 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
         while (cur) |child| : (cur = child.next) {
             if (child.is_floating) continue;
             const bg = if (child.is_focused) COLOR_FOCUSED_BG else COLOR_UNFOCUSED_BG;
-            const bg_val = [_]u32{bg};
-            _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_BACKGROUND, &bg_val);
-            _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &bg_val);
+            const bg_val = [_]u32{ bg, bg }; // foreground, background (bit order)
+            _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND | xcb.c.XCB_GC_BACKGROUND, &bg_val);
             const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = 0, .y = y, .width = @intCast(r.w), .height = tbh }};
             _ = xcb.c.xcb_poly_fill_rectangle(conn, frame_win, title_gc, 1, &rect);
 
@@ -151,9 +149,8 @@ pub fn drawNormalTitleBar(conn: *xcb.Connection, con: *tree.Container) void {
     const bg: u32 = if (con.is_focused) COLOR_FOCUSED_BG else COLOR_UNFOCUSED_BG;
 
     // Fill title bar background
-    const bg_val = [_]u32{bg};
-    _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_BACKGROUND, &bg_val);
-    _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND, &bg_val);
+    const bg_val = [_]u32{ bg, bg }; // foreground, background (bit order)
+    _ = xcb.c.xcb_change_gc(conn, title_gc, xcb.c.XCB_GC_FOREGROUND | xcb.c.XCB_GC_BACKGROUND, &bg_val);
     const rect = [_]xcb.c.xcb_rectangle_t{.{ .x = 0, .y = 0, .width = content_w, .height = tbh }};
     _ = xcb.c.xcb_poly_fill_rectangle(conn, frame_id, title_gc, 1, &rect);
 
@@ -166,8 +163,8 @@ pub fn redrawTitleBarsForContainer(conn: *xcb.Connection, con: *tree.Container) 
     if (con.layout != .tabbed and con.layout != .stacked) return;
     if (con.children.len() <= 1) return;
     drawTitleBars(conn, con);
-    _ = xcb.flush(conn);
 }
+
 
 pub fn ensureTitleGc(conn: *xcb.Connection, root_window: xcb.Window) void {
     if (title_gc_initialized) return;
@@ -280,13 +277,23 @@ fn applyRecursive(
             const hide_unfocused = (con.layout == .tabbed or con.layout == .stacked) and
                 con.children.len() > 1;
 
-            // Single pass: process tiling, collect floating/fullscreen for deferred rendering
+            // Single pass: process tiling, collect floating/fullscreen/border-normal
             var floating_buf: [32]*tree.Container = undefined;
             var floating_count: usize = 0;
             var fullscreen_buf: [8]*tree.Container = undefined;
             var fullscreen_count: usize = 0;
             var normal_border_buf: [32]*tree.Container = undefined;
             var normal_border_count: usize = 0;
+
+            // Pre-compute for tabbed/stacked O(n) visibility (avoid O(n²))
+            const has_focused_tiling = if (hide_unfocused) anyTilingChildFocused(con) else false;
+            const first_tiling: ?*tree.Container = if (hide_unfocused and !has_focused_tiling) blk: {
+                var fc = con.children.first;
+                while (fc) |c| : (fc = c.next) {
+                    if (!c.is_floating and c.is_fullscreen == .none) break :blk c;
+                }
+                break :blk null;
+            } else null;
 
             var cur = con.children.first;
             while (cur) |child| : (cur = child.next) {
@@ -307,7 +314,7 @@ fn applyRecursive(
 
                 // Tiling child
                 if (hide_unfocused) {
-                    const show = child.is_focused or (!anyTilingChildFocused(con) and isFirstTilingChild(con, child));
+                    const show = child.is_focused or (!has_focused_tiling and child == first_tiling.?);
                     if (show) {
                         mapSubtree(conn, child);
                         applyRecursive(conn, child, border_focus_color, border_unfocus_color);
@@ -316,36 +323,25 @@ fn applyRecursive(
                     }
                 } else {
                     applyRecursive(conn, child, border_focus_color, border_unfocus_color);
-                }
-            }
-
-            // Collect border normal windows for deferred title bar drawing
-            {
-                var nc = con.children.first;
-                while (nc) |child| : (nc = child.next) {
-                    if (child.is_floating or child.is_fullscreen != .none) continue;
+                    // Collect border normal windows inline (avoid second pass)
                     if (child.type == .window and child.border_style == .normal) {
-                        // Skip if inside tabbed/stacked with >1 children (parent headers take precedence)
-                        if (!hide_unfocused) {
-                            if (normal_border_count < 32) {
-                                normal_border_buf[normal_border_count] = child;
-                                normal_border_count += 1;
-                            }
+                        if (normal_border_count < 32) {
+                            normal_border_buf[normal_border_count] = child;
+                            normal_border_count += 1;
                         }
                     }
                 }
             }
 
             // Draw tab bar / stacked headers AFTER frames are configured.
-            // Flush first so X server processes configure before we draw.
+            // XCB processes requests in FIFO order, so no flush needed between
+            // configure and draw — the single flush at the end of applyTree suffices.
             if (hide_unfocused and title_gc != 0) {
-                _ = xcb.flush(conn);
                 drawTitleBars(conn, con);
             }
 
-            // Draw border normal title bars (after flush, before floating)
+            // Draw border normal title bars
             if (normal_border_count > 0 and title_gc != 0) {
-                if (!hide_unfocused) _ = xcb.flush(conn);
                 for (normal_border_buf[0..normal_border_count]) |child| {
                     drawNormalTitleBar(conn, child);
                 }
@@ -356,21 +352,11 @@ fn applyRecursive(
                 applyRecursive(conn, child, border_focus_color, border_unfocus_color);
             }
 
-            // Draw border normal title bars on floating windows
+            // Draw border normal title bars on floating windows (single pass)
             if (title_gc != 0) {
-                var has_float_normal = false;
                 for (floating_buf[0..floating_count]) |child| {
                     if (child.type == .window and child.border_style == .normal) {
-                        has_float_normal = true;
-                        break;
-                    }
-                }
-                if (has_float_normal) {
-                    _ = xcb.flush(conn);
-                    for (floating_buf[0..floating_count]) |child| {
-                        if (child.type == .window and child.border_style == .normal) {
-                            drawNormalTitleBar(conn, child);
-                        }
+                        drawNormalTitleBar(conn, child);
                     }
                 }
             }
