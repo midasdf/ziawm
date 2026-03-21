@@ -1,0 +1,21 @@
+FROM archlinux:latest
+
+RUN echo -e 'Server = https://mirror.rackspace.com/archlinux/$repo/os/$arch\nServer = https://ftp.jaist.ac.jp/pub/Linux/ArchLinux/$repo/os/$arch\nServer = https://geo.mirror.pkgbuild.com/$repo/os/$arch' > /etc/pacman.d/mirrorlist
+
+RUN pacman -Sy --noconfirm --needed \
+    xorg-server-xvfb xorg-xwininfo xorg-xprop xdotool \
+    xorg-xwd netpbm \
+    libxcb xcb-util-keysyms libxkbcommon libxft fontconfig libx11 \
+    xorg-fonts-misc ttf-dejavu \
+    xterm rxvt-unicode \
+    xorg-xclock xorg-xeyes \
+    && yes | pacman -Scc 2>/dev/null || true
+
+WORKDIR /zephwm
+COPY zig-out/bin/zephwm zig-out/bin/zephwm-msg zig-out/bin/zephwm-bar ./bin/
+COPY config/ ./config/
+COPY test_realapps_extended.sh ./
+
+RUN mkdir -p /run/user/0 && chmod 700 /run/user/0
+ENV XDG_RUNTIME_DIR=/run/user/0
+ENV PATH="/zephwm/bin:$PATH"
