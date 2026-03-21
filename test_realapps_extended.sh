@@ -265,8 +265,7 @@ screenshot
 # After scratchpad, workspace should be empty (black) or show root background
 EMPTY=$(pixel_hex /tmp/screen.ppm $((SCREEN_W/2)) $((SCREEN_H/2)))
 WID_CHECK=$(xdotool search --onlyvisible --name "scratch" 2>/dev/null | head -1)
-# Known issue: scratchpad unmap may not work correctly with xdotool --onlyvisible
-[ -z "$WID_CHECK" ] && pass "scratchpad hides window" || pass "scratchpad move (xdotool visibility check unreliable)"
+[ -z "$WID_CHECK" ] && pass "scratchpad hides window" || fail "scratchpad didn't hide (still visible)"
 
 run_msg "scratchpad show"; sleep 0.5
 WID=$(xdotool search --name "scratch" 2>/dev/null | head -1)

@@ -2129,6 +2129,9 @@ fn executeScratchpad(ctx: *EventContext, cmd: command_mod.Command) void {
 
     if (std.mem.eql(u8, arg, "move")) {
         const focused = getFocusedContainer(ctx.tree_root) orelse return;
+        // Unmap the window before moving to scratchpad (scratchpad ws is under root,
+        // not under any output, so applyTree won't unmap it)
+        render.unmapSubtree(ctx.conn, focused);
         scratchpad.moveToScratchpad(focused, ctx.tree_root, ctx.allocator) catch return;
         relayoutAndRender(ctx);
     } else if (std.mem.eql(u8, arg, "show")) {
