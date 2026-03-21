@@ -131,7 +131,7 @@ pub const Container = struct {
     is_focused: bool = false,
     is_scratchpad: bool = false,
     is_sticky: bool = false,
-    border_style: BorderStyle = .pixel,
+    border_style: BorderStyle = .normal,
     border_width_override: i16 = -1, // -1 = use config default
     dirty: bool = true,
     marks: [4]?[]const u8 = .{null} ** 4,

@@ -50,7 +50,8 @@ pub const Config = struct {
     allocator: Allocator,
     variables: StringHashMapManaged([]const u8),
     keybinds: ArrayListManaged(Keybind),
-    border_px: u32 = 1,
+    border_px: u32 = 2,
+    default_border_style: @import("tree.zig").BorderStyle = .normal,
     gap_inner: u32 = 0,
     gap_outer: u32 = 0,
     focus_follows_mouse: bool = true,
@@ -225,10 +226,25 @@ pub const Config = struct {
                 continue;
             }
 
-            // default_border pixel N
-            if (std.mem.startsWith(u8, line, "default_border pixel ")) {
-                const num_str = std.mem.trim(u8, line["default_border pixel ".len..], " \t");
-                cfg.border_px = std.fmt.parseInt(u32, num_str, 10) catch cfg.border_px;
+            // default_border pixel N / normal N / none
+            if (std.mem.startsWith(u8, line, "default_border ")) {
+                const rest = std.mem.trim(u8, line["default_border ".len..], " \t");
+                if (std.mem.startsWith(u8, rest, "pixel ")) {
+                    const num_str = std.mem.trim(u8, rest["pixel ".len..], " \t");
+                    cfg.border_px = std.fmt.parseInt(u32, num_str, 10) catch cfg.border_px;
+                    cfg.default_border_style = .pixel;
+                } else if (std.mem.startsWith(u8, rest, "normal ")) {
+                    const num_str = std.mem.trim(u8, rest["normal ".len..], " \t");
+                    cfg.border_px = std.fmt.parseInt(u32, num_str, 10) catch cfg.border_px;
+                    cfg.default_border_style = .normal;
+                } else if (std.mem.eql(u8, rest, "pixel")) {
+                    cfg.default_border_style = .pixel;
+                } else if (std.mem.eql(u8, rest, "normal")) {
+                    cfg.default_border_style = .normal;
+                } else if (std.mem.eql(u8, rest, "none")) {
+                    cfg.default_border_style = .none;
+                    cfg.border_px = 0;
+                }
                 continue;
             }
 

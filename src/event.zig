@@ -727,6 +727,10 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
         .pending_unmap = 1, // absorb synthetic UnmapNotify from reparent
     };
     con.is_floating = should_float;
+    // Apply default border style from config
+    if (ctx.config) |cfg| {
+        con.border_style = cfg.default_border_style;
+    }
 
     // Register both client and frame in window lookup map
     registerWindow(ctx, window, con);
