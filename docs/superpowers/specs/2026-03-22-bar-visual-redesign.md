@@ -12,7 +12,38 @@ Redesign zephwm-bar for a crisp, minimal aesthetic optimized for the 720x720 Hac
 
 ## Design
 
-### 1. Hybrid Status Architecture
+### 1. Bar Presence Decoupled from status_command
+
+Currently, the bar's existence is coupled to `status_command.len > 0` in three places:
+- `main.zig`: bar spawning
+- `event.zig`: bar space reservation (`bar_height = 20`)
+- `main.zig` IPC: `GET_BAR_CONFIG` response
+
+This coupling must be broken. The bar should be spawned and space reserved whenever a `bar {}` block is present in config, regardless of `status_command`. A new `BarConfig.enabled` flag (set to `true` when a `bar {}` block is parsed) controls all bar-related behavior.
+
+Changes required:
+- `config.zig`: Update `BarConfig` struct and parser:
+
+```zig
+pub const BarConfig = struct {
+    enabled: bool = false,                  // NEW: true when bar {} block is parsed
+    status_command: []const u8 = "",
+    position: []const u8 = "bottom",
+    bg_color: []const u8 = "#222222",
+    statusline_color: []const u8 = "#dddddd",
+    height: u16 = 16,                       // NEW: bar height in pixels (default 16)
+};
+```
+
+In the config parser, when entering the `bar {` block (currently sets `in_bar = true`), also set `cfg.bar.enabled = true`.
+
+- `main.zig` bar spawning: Check `cfg.bar.enabled` instead of `cfg.bar.status_command.len > 0`.
+- `event.zig` space reservation: Check `cfg.bar.enabled` instead of `cfg.bar.status_command.len > 0`. Use `cfg.bar.height` instead of hardcoded 20.
+- `bar.zig` `spawnBar()`: Remove the `if (status_command.len == 0) return;` early-return guard. The `status_command` parameter is still passed to the bar binary as `argv[1]`. When `status_command` is `""`, the bar binary receives an empty string as argv[1] and enters built-in mode. When non-empty, it spawns the external process as before.
+- `main.zig` IPC `GET_BAR_CONFIG`: Report `bar_height` from `cfg.bar.height`, not hardcoded 20.
+- `main.zig` reload handler (SIGUSR1): Add `bar.killBar()` + `bar.spawnBar()` to the reload path. Currently the reload handler does NOT respawn the bar — this must be added so the bar picks up new config on `$mod+Shift+c`.
+
+### 2. Hybrid Status Architecture
 
 The bar operates in two modes, selected automatically:
 
@@ -29,19 +60,65 @@ External mode:
   status_command stdout (i3bar JSON) → StatusBlock[] → drawBar()
 ```
 
-### 2. Built-in Status Modules
+#### StatusBlock struct change
+
+The existing `StatusBlock` struct gains a `color` field:
+
+```zig
+const StatusBlock = struct {
+    name: [64]u8,
+    instance: [64]u8,
+    full_text: [256]u8,
+    full_text_len: u16,
+    color: u32,           // NEW: pixel color value (0xRRGGBB), 0 = use default fg
+};
+```
+
+- Built-in modules populate `color` with their assigned module color (e.g., `0x6a9955` for CPU).
+- External mode sets `color = 0` (use default `FG_COLOR`). Parsing the i3bar protocol `color` field is out of scope.
+
+### 3. Built-in Status Modules
 
 | Module | Source | Update Interval | Display Format | Color |
 |--------|--------|----------------|----------------|-------|
 | CPU | `/proc/stat` (diff between reads) | 2s | `CPU 12%` | `#6a9955` (green) |
-| Memory | `/proc/meminfo` MemAvailable | 5s | `MEM 234M` | `#569cd6` (blue) |
-| Swap | `/proc/meminfo` SwapTotal-SwapFree | 5s | `SW 45M` | `#d19a66` (orange) |
-| Network | `/proc/net/wireless` + `/proc/net/if_inet6` or ioctl for SSID | 10s | `WiFi BCW730J-8086A` | `#56b6c2` (cyan) |
-| Battery | `/sys/class/power_supply/*/capacity` | 30s | `BAT 78%` | `#98c379` (green) |
-| IME | X input method property or fcitx5 state | 1s | `IME` or `あ` | `#c678dd` (purple) |
-| Clock | `clock_gettime(CLOCK_REALTIME)` | 60s | `14:32` | `#e0e0e0` (white) |
+| Memory | `/proc/meminfo` (MemTotal - MemAvailable = used) | 5s | `MEM 234M` | `#569cd6` (blue) |
+| Swap | `/proc/meminfo` (SwapTotal - SwapFree = used) | 5s | `SW 45M` | `#d19a66` (orange) |
+| Network | See SSID detection below | 10s | `WiFi BCW730J-8086A` | `#56b6c2` (cyan) |
+| Battery | See battery detection below | 30s | `BAT 78%` | `#98c379` (green) |
+| IME | See IME detection below | 1s | `IME` or `あ` | `#c678dd` (purple) |
+| Clock | `clock_gettime(CLOCK_REALTIME)` + `localtime_r()` | see below | `14:32` | `#e0e0e0` (white) |
 
 Module order (left to right in the right section): CPU, MEM, SW, WiFi, BAT, IME, Clock.
+
+Notes:
+- Memory and Swap display **used** amounts (not available/free).
+- Clock uses local time via `localtime_r()` (thread-safe, avoids static buffer), not raw UTC.
+- Clock update: compute seconds remaining until the next minute boundary. On each epoll cycle, check if the current minute has changed; only set dirty flag when it has. This avoids both the 59s lag problem and unnecessary 1s polling.
+
+#### SSID detection
+
+1. Discover wireless interface: iterate `/sys/class/net/`, check for `wireless/` subdirectory (e.g., `wlu1u1`, not hardcoded `wlan0`).
+2. Get SSID: `ioctl(SIOCGIWESSID)` on a raw socket for the discovered interface. No external library needed — Zig can make this syscall directly.
+3. Get connection state: check if the interface is UP and has an SSID.
+
+#### Battery detection
+
+1. Iterate `/sys/class/power_supply/` directory entries.
+2. For each entry, read the `type` file. Only use entries where `type` reads `Battery` (skip `Mains`/`USB` AC adapter entries).
+3. Read `capacity` file for percentage (0-100).
+4. If no battery entry found, the battery module is silently hidden (no space consumed).
+
+#### IME state detection
+
+Use the X root window property `_FCITX_CURRENT_IM` set by fcitx5. This property contains the current input method name as a string (e.g., `keyboard-us`, `mozc`).
+
+- Poll: `XGetWindowProperty` on the root window for `_FCITX_CURRENT_IM` atom every 1s.
+- If the property value contains `mozc` or a known Japanese IM name → display `あ` (Japanese active).
+- If the property value is `keyboard-*` or empty → display `A` (direct input).
+- If the property does not exist (fcitx5 not running) → hide the IME module entirely.
+
+No D-Bus dependency. XGetWindowProperty is already available via the existing Xlib connection.
 
 #### Threshold-based color changes
 
@@ -51,13 +128,20 @@ Module order (left to right in the right section): CPU, MEM, SW, WiFi, BAT, IME,
 
 #### SSID truncation
 
-Long SSIDs are truncated to 14 characters with `...` suffix. Example: `BCW730J-8086A-...`.
+Long SSIDs are truncated to 14 characters of the original SSID, then `...` is appended (total display width up to 17 characters). Example: `BCW730J-8086A-` (14 chars) + `...` = `BCW730J-8086A-...`. SSIDs of 14 characters or fewer are displayed in full without ellipsis.
+
+#### Separator rendering
+
+- Separator character: `|` rendered in `#505060`.
+- Spacing: 4px on each side of the pipe character.
+- Separators appear between every visible module (hidden modules produce no separator).
+- No trailing separator after the rightmost module (Clock).
 
 #### Update scheduling
 
-Each module tracks its own `last_updated` timestamp. On each epoll cycle (500ms), the bar checks which modules are due for refresh. Only stale modules re-read their `/proc` or `/sys` sources. This keeps I/O minimal.
+Each module tracks its own `last_updated` timestamp. On each epoll cycle (500ms), the bar checks which modules are due for refresh. Only stale modules re-read their `/proc` or `/sys` sources. A global `dirty` flag is set when any module updates; `drawBar()` is only called when `dirty == true` or an X expose event occurs. This minimizes unnecessary X traffic.
 
-### 3. Bar Visual Improvements
+### 4. Bar Visual Improvements
 
 Changes from current rendering constants:
 
@@ -66,14 +150,23 @@ Changes from current rendering constants:
 | Bar height | 20px | 16px |
 | Font | `monospace:size=10` | `monospace:size=8` |
 | Background | `#222222` | `#1a1a2e` |
-| Status text | all `#dddddd` | per-module color (see table above) |
-| Separator | none | `\|` pipe in `#505060` |
+| Status text | all `#dddddd` | per-module color via `StatusBlock.color` |
+| Separator | none | `\|` pipe in `#505060` with 4px padding each side |
 | Focused workspace bg | `#285577` | `#4a6fa5` |
 | Unfocused workspace text | `#888888` | `#606060` |
 
-The rendering changes are in `drawBar()`. For built-in mode, each `StatusBlock` carries a color field that `drawBar()` uses. For external mode, the existing single-color rendering is preserved (unless the i3bar protocol's `color` field is set per-block, which is already part of the protocol but not currently parsed).
+**Bar height must be updated in all locations:**
+- `zephwm-bar/main.zig`: `BAR_HEIGHT` constant (window creation, struts, rendering)
+- `src/event.zig`: `bar_height` assignment (workspace layout reservation)
+- `src/main.zig`: `GET_BAR_CONFIG` IPC response (`"bar_height"` field)
 
-### 4. Default Config Auto-Generation
+All three must use the same value (16). Ideally, `event.zig` and the IPC response read the bar height from `BarConfig` rather than using a hardcoded value.
+
+The `drawBar()` rendering changes:
+- For built-in mode: each `StatusBlock` has its `color` field set; `drawBar()` creates an `XftColor` from it.
+- For external mode: `StatusBlock.color` is 0, so `drawBar()` uses the default `FG_COLOR` (`#dddddd`).
+
+### 5. Default Config Auto-Generation
 
 When zephwm starts and no config file is found at any of the 4 search paths:
 1. `$XDG_CONFIG_HOME/zephwm/config`
@@ -157,44 +250,22 @@ Key decisions:
 ```
 loadConfig():
   try 4 paths → all fail
-  → mkdir -p ~/.config/zephwm/
-  → write default config to ~/.config/zephwm/config
-  → log: "Generated default config at ~/.config/zephwm/config"
-  → load the generated file as config
+  → attempt mkdir -p ~/.config/zephwm/
+  → if mkdir fails (permissions, read-only FS, HOME unset):
+      → log warning: "Could not create config directory: {error}"
+      → use in-memory default config (same content, not written to disk)
+      → continue startup normally
+  → if mkdir succeeds:
+      → write default config to ~/.config/zephwm/config
+      → log: "Generated default config at ~/.config/zephwm/config"
+      → load the generated file as config
 ```
 
-### 5. Bar Spawning Without status_command
+The WM must never fail to start due to config generation errors. If writing fails, the same defaults are applied in memory.
 
-Current logic in `main.zig`:
-```zig
-if (cfg.bar.status_command.len > 0) {
-    bar.spawnBar(cfg.bar.status_command, cfg.bar.position);
-}
-```
+### 6. Config Reload Behavior
 
-This must change to spawn the bar even without `status_command`:
-```zig
-if (cfg.bar.status_command.len > 0) {
-    bar.spawnBar(cfg.bar.status_command, cfg.bar.position);
-} else {
-    bar.spawnBar("", cfg.bar.position);  // built-in mode
-}
-```
-
-The bar binary itself checks: if `status_command` is empty, initialize built-in modules instead of spawning an external process.
-
-### 6. IME State Detection
-
-For fcitx5 (installed on HackberryPi):
-
-**Approach**: Read the X root window property `_FCITX_INPUT_STATUS` or use the `XMODIFIERS` / fcitx5 remote tool. The simplest reliable method is:
-
-- Check `_NET_WM_PID` of focused window for input method client
-- Read `/proc/bus/input/devices` or poll fcitx5's D-Bus interface
-
-**Practical approach for minimal deps**: Use `XGetInputFocus` + check `_XWAYLAND_INPUT_METHOD_STATE` or the XIM protocol state. If fcitx5 is not available, display `--` instead.
-
-**Fallback**: If no IME detection method works, the IME module is silently hidden (no space consumed in the bar).
+The current reload handler (SIGUSR1 in `main.zig`) does NOT respawn the bar. It only reloads keybinds, colors, and flags. A new step must be added to the reload handler: call `bar.killBar()` then `bar.spawnBar(cfg.bar.status_command, cfg.bar.position)` so the bar picks up new visual settings on `$mod+Shift+c`.
 
 ## Scope
 
