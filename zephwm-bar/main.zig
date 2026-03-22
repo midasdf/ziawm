@@ -3,6 +3,7 @@
 // Supports per-output bars: one bar window per monitor output.
 const std = @import("std");
 const ipc = @import("ipc");
+const builtin_status = @import("builtin_status");
 
 const c = @cImport({
     @cInclude("xcb/xcb.h");
@@ -249,6 +250,7 @@ pub fn main() !void {
 
     // Spawn status_command and read from its stdout via pipe
     var status_pipe_fd: std.posix.fd_t = -1;
+    var status_command_len: usize = 0;
     {
         // Get status_command from bar config via IPC
         const bar_cfg = ipc.sendRequest(allocator, sock_path, .get_bar_config, "") orelse null;
@@ -264,12 +266,23 @@ pub fn main() !void {
             }
         }
         if (status_cmd) |cmd| {
+            status_command_len = cmd.len;
             if (cmd.len > 0) {
                 const spawn_result = spawnStatusCommand(cmd);
                 status_pipe_fd = spawn_result.stdout_fd;
                 status_stdin_fd = spawn_result.stdin_fd;
             }
         }
+    }
+
+    // Built-in status mode: when no status_command is configured, use built-in modules
+    const builtin_mode = (status_command_len == 0);
+    var module_state = builtin_status.ModuleState{};
+    var module_outputs: [builtin_status.MODULE_COUNT]builtin_status.ModuleOutput = undefined;
+    for (&module_outputs) |*o| o.* = .{};
+
+    if (builtin_mode) {
+        std.debug.print("zephwm-bar: built-in status mode (no status_command)\n", .{});
     }
 
     // Workspace info cache
@@ -364,18 +377,42 @@ pub fn main() !void {
 
         if (c.xcb_connection_has_error(conn) != 0) break;
 
-        // Read status command output (non-blocking)
-        if (status_pipe_fd >= 0) {
-            const prev_click_enabled = click_events_enabled;
-            parseStatusUpdate(status_pipe_fd, &status_blocks, &status_block_count, &click_events_enabled, &json_mode, &status_read_buf, &status_read_len);
-            // When click_events first enabled, send the opening bracket
-            if (click_events_enabled and !prev_click_enabled and status_stdin_fd >= 0) {
-                _ = std.posix.write(status_stdin_fd, "[\n") catch {};
+        if (builtin_mode) {
+            // Built-in status mode: update modules based on elapsed time
+            const now = std.time.timestamp();
+            module_state.dirty = false;
+            builtin_status.updateAll(&module_state, now, @ptrCast(dpy), @intCast(root), &module_outputs);
+
+            if (module_state.dirty) {
+                // Convert ModuleOutput array to StatusBlock array
+                status_block_count = 0;
+                for (0..builtin_status.MODULE_COUNT) |i| {
+                    const mod = &module_outputs[i];
+                    if (mod.text_len == 0) continue; // skip hidden modules
+                    const idx = status_block_count;
+                    status_blocks[idx] = .{};
+                    const tlen = mod.text_len;
+                    @memcpy(status_blocks[idx].full_text[0..tlen], mod.text[0..tlen]);
+                    status_blocks[idx].full_text_len = tlen;
+                    status_blocks[idx].color = mod.color;
+                    status_block_count += 1;
+                }
+            }
+        } else {
+            // External status_command mode: read from pipe (non-blocking)
+            if (status_pipe_fd >= 0) {
+                const prev_click_enabled = click_events_enabled;
+                parseStatusUpdate(status_pipe_fd, &status_blocks, &status_block_count, &click_events_enabled, &json_mode, &status_read_buf, &status_read_len);
+                // When click_events first enabled, send the opening bracket
+                if (click_events_enabled and !prev_click_enabled and status_stdin_fd >= 0) {
+                    _ = std.posix.write(status_stdin_fd, "[\n") catch {};
+                }
             }
         }
 
         // Refresh workspace state on timeout or after processing events
         refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, &ws_count);
+        // Redraw all bars (workspace refresh always triggers redraw)
         for (bars[0..bar_count]) |*bar| {
             drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, &focused_fg, &unfocused_fg, &fg_color);
         }

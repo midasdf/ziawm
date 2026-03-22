@@ -45,12 +45,14 @@ pub fn build(b: *std.Build) void {
     msg_exe.linkLibC();
     b.installArtifact(msg_exe);
 
-    // builtin_status module (pure Zig, no system dependencies)
+    // builtin_status module (needs libc for ioctl/localtime_r, X11 for IME property)
     const builtin_status_mod = b.createModule(.{
         .root_source_file = b.path("zephwm-bar/builtin_status.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
+    builtin_status_mod.linkSystemLibrary("X11", .{});
 
     // --- zephwm-bar ---
     const bar_exe = b.addExecutable(.{
