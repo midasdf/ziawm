@@ -14,18 +14,20 @@ const c = @cImport({
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
 const VERSION = "0.1.0";
-const BAR_HEIGHT: u16 = 20;
+const BAR_HEIGHT: u16 = 16;
 const WS_BUTTON_PAD: u16 = 10; // horizontal padding per workspace button
 const STATUS_PAD: u16 = 8;
 
 // Colors
-const BG_COLOR: u32 = 0x222222;
+const BG_COLOR: u32 = 0x1a1a2e;
 const FG_COLOR_STR = "#dddddd";
-const FOCUSED_BG: u32 = 0x285577;
+const FOCUSED_BG: u32 = 0x4a6fa5;
 const FOCUSED_FG_STR = "#ffffff";
 const URGENT_BG: u32 = 0x900000;
-const UNFOCUSED_FG_STR = "#888888";
-const FONT_NAME = "monospace:size=10";
+const UNFOCUSED_FG_STR = "#606060";
+const SEPARATOR_COLOR_STR = "#505060";
+const SEPARATOR_PAD: u16 = 4;
+const FONT_NAME = "monospace:size=8";
 
 const MAX_OUTPUTS = 8;
 const MaxWorkspaces = 16;
