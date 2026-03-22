@@ -307,7 +307,7 @@ fn relayoutAndRender(ctx: *EventContext) void {
     const gap_outer: u32 = if (cfg) |c| c.gap_outer else 0;
     const border: u32 = if (cfg) |c| c.border_px else 1;
 
-    // Reserve space for bar (20px default bar height)
+    // Reserve space for bar (height from config, default 16px)
     var bar_height: u32 = 0;
     var bar_top: bool = true;
     if (cfg) |c_cfg| {
