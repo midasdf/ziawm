@@ -883,6 +883,10 @@ pub fn main() !void {
                                 ctx.focus_follows_mouse = cfg.focus_follows_mouse;
                                 ctx.config = cfg;
                                 event.grabKeys(&ctx, cfg);
+                                bar.killBar();
+                                if (cfg.bar.enabled) {
+                                    bar.spawnBar(cfg.bar.status_command, cfg.bar.position);
+                                }
                             } else {
                                 ctx.config = null;
                             }
