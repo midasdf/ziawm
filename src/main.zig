@@ -33,6 +33,68 @@ fn jsonEscapeWrite(w: anytype, s: []const u8) !void {
 const DEFAULT_BORDER_FOCUS_COLOR: u32 = 0x4c7899;
 const DEFAULT_BORDER_UNFOCUS_COLOR: u32 = 0x333333;
 
+// Default config written on first launch when no config file is found
+const default_config =
+    \\# zephwm default config
+    \\
+    \\set $mod Mod1
+    \\
+    \\# Terminal
+    \\bindsym $mod+Return exec zt
+    \\
+    \\# Close window
+    \\bindsym $mod+Shift+q kill
+    \\
+    \\# Focus
+    \\bindsym $mod+Left focus left
+    \\bindsym $mod+Down focus down
+    \\bindsym $mod+Up focus up
+    \\bindsym $mod+Right focus right
+    \\
+    \\# Move
+    \\bindsym $mod+Shift+Left move left
+    \\bindsym $mod+Shift+Down move down
+    \\bindsym $mod+Shift+Up move up
+    \\bindsym $mod+Shift+Right move right
+    \\
+    \\# Split
+    \\bindsym $mod+b splith
+    \\bindsym $mod+v splitv
+    \\
+    \\# Layout
+    \\bindsym $mod+s layout stacking
+    \\bindsym $mod+w layout tabbed
+    \\bindsym $mod+e layout toggle split
+    \\
+    \\# Fullscreen
+    \\bindsym $mod+f fullscreen toggle
+    \\
+    \\# Floating
+    \\bindsym $mod+Shift+space floating toggle
+    \\bindsym $mod+space focus mode_toggle
+    \\
+    \\# Workspaces
+    \\bindsym $mod+1 workspace 1
+    \\bindsym $mod+2 workspace 2
+    \\bindsym $mod+3 workspace 3
+    \\bindsym $mod+4 workspace 4
+    \\
+    \\bindsym $mod+Shift+1 move container to workspace 1
+    \\bindsym $mod+Shift+2 move container to workspace 2
+    \\bindsym $mod+Shift+3 move container to workspace 3
+    \\bindsym $mod+Shift+4 move container to workspace 4
+    \\
+    \\# Reload / Exit
+    \\bindsym $mod+Shift+c reload
+    \\bindsym $mod+Shift+e exit
+    \\
+    \\# Bar (built-in status modules, no external status_command needed)
+    \\bar {
+    \\    position top
+    \\}
+    \\
+;
+
 // IPC constants
 const IPC_LISTEN_FD_TAG: i32 = -100; // sentinel for epoll data.fd
 const SIGNAL_FD_TAG: i32 = -200; // sentinel for signalfd in epoll
@@ -411,7 +473,25 @@ fn loadConfig(allocator: std.mem.Allocator) ?config_mod.Config {
     // 4. /etc/zephwm/config
     if (readConfigFile(allocator, "/etc/zephwm/config")) |cfg| return cfg;
 
-    return null;
+    // No config found — generate default config at ~/.config/zephwm/config
+    const wrote_file = if (std.posix.getenv("HOME")) |h| blk: {
+        const config_dir = std.fmt.allocPrint(allocator, "{s}/.config/zephwm", .{h}) catch break :blk false;
+        defer allocator.free(config_dir);
+        std.fs.cwd().makePath(config_dir) catch break :blk false;
+        const config_path = std.fmt.allocPrint(allocator, "{s}/.config/zephwm/config", .{h}) catch break :blk false;
+        defer allocator.free(config_path);
+        const file = std.fs.createFileAbsolute(config_path, .{}) catch break :blk false;
+        defer file.close();
+        file.writeAll(default_config) catch break :blk false;
+        std.debug.print("zephwm: generated default config at {s}\n", .{config_path});
+        break :blk true;
+    } else false;
+
+    if (!wrote_file) {
+        std.debug.print("zephwm: no config found and could not write default config, using in-memory defaults\n", .{});
+    }
+
+    return config_mod.Config.parse(allocator, default_config) catch null;
 }
 
 fn readConfigFile(allocator: std.mem.Allocator, path: []const u8) ?config_mod.Config {
