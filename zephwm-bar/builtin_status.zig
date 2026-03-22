@@ -226,13 +226,62 @@ fn findBatteryCapacity() ?u8 {
     return null;
 }
 
-// --- Task 15: SSID ioctl implementation (stub — implemented in next commit) ---
+// --- Task 15: SSID ioctl implementation ---
+
+// Manual definitions for wireless ioctl (avoids @cImport of linux/wireless.h
+// which has complex unions that Zig's translate-c can struggle with).
+const SIOCGIWESSID: u32 = 0x8B1B;
+const IW_ESSID_MAX_SIZE: usize = 32;
+const IFNAMSIZ: usize = 16;
+
+// iwreq layout (x86_64): 32 bytes total
+// [0..16]:  ifr_ifrn.ifrn_name[IFNAMSIZ]
+// [16..24]: iw_point.pointer (void*, 8 bytes on x86_64)
+// [24..26]: iw_point.length (u16)
+// [26..28]: iw_point.flags (u16)
+// [28..32]: padding to align union iwreq_data (16 bytes total)
+const IwreqRaw = extern struct {
+    ifrn_name: [IFNAMSIZ]u8,
+    // union iwreq_data - we only use the essid (iw_point) member
+    pointer: ?[*]u8, // iw_point.pointer
+    length: u16, // iw_point.length
+    flags: u16, // iw_point.flags
+    _pad: [4]u8, // remaining bytes of the union
+};
 
 /// Get SSID from a wireless interface via ioctl SIOCGIWESSID.
-/// TODO: implement with actual ioctl call
 pub fn getSsid(iface_name: []const u8) ?SsidBuf {
-    _ = iface_name;
-    return null;
+    // Open a DGRAM socket for ioctl
+    const sock = posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch return null;
+    defer posix.close(sock);
+
+    var essid_buf: [IW_ESSID_MAX_SIZE + 1]u8 = .{0} ** (IW_ESSID_MAX_SIZE + 1);
+    var req: IwreqRaw = std.mem.zeroes(IwreqRaw);
+
+    // Copy interface name
+    const name_len = @min(iface_name.len, IFNAMSIZ - 1);
+    @memcpy(req.ifrn_name[0..name_len], iface_name[0..name_len]);
+    req.ifrn_name[name_len] = 0;
+
+    // Set up iw_point to point to our buffer
+    req.pointer = &essid_buf;
+    req.length = IW_ESSID_MAX_SIZE;
+    req.flags = 0;
+
+    // Call ioctl
+    const rc = std.os.linux.ioctl(sock, SIOCGIWESSID, @intFromPtr(&req));
+    const rc_signed: isize = @bitCast(rc);
+    if (rc_signed < 0) return null;
+
+    // Extract SSID from buffer
+    const ssid_len = @min(req.length, IW_ESSID_MAX_SIZE);
+    if (ssid_len == 0) return null;
+
+    var result = SsidBuf{};
+    const copy_len = @min(ssid_len, @as(u16, 32));
+    @memcpy(result.data[0..copy_len], essid_buf[0..copy_len]);
+    result.len = @intCast(copy_len);
+    return result;
 }
 
 /// Discover the first wireless interface by checking /sys/class/net/*/wireless/.
