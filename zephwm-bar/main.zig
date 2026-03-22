@@ -57,6 +57,7 @@ const StatusBlock = struct {
     instance_len: u8 = 0,
     full_text: [256]u8 = undefined,
     full_text_len: u16 = 0,
+    color: u32 = 0, // 0xRRGGBB, 0 = use default FG_COLOR
 };
 
 const MAX_STATUS_BLOCKS = 32;
@@ -469,6 +470,19 @@ fn findNumEnd(data: []const u8, start: usize) usize {
     return i;
 }
 
+/// Convert a packed 0xRRGGBB u32 to XftColor without a server round-trip.
+fn xftColorFromU32(pixel: u32) c.XftColor {
+    return .{
+        .pixel = pixel,
+        .color = .{
+            .red = @as(u16, @intCast((pixel >> 16) & 0xFF)) * 257,
+            .green = @as(u16, @intCast((pixel >> 8) & 0xFF)) * 257,
+            .blue = @as(u16, @intCast(pixel & 0xFF)) * 257,
+            .alpha = 0xFFFF,
+        },
+    };
+}
+
 fn drawBar(
     conn: *c.xcb_connection_t,
     dpy: *c.Display,
@@ -543,9 +557,18 @@ fn drawBar(
 
     // Draw status blocks (right-to-left)
     if (status_block_count > 0) {
+        const sep_str = "|";
+        var sep_extents: c.XGlyphInfo = undefined;
+        c.XftTextExtentsUtf8(dpy, font, sep_str.ptr, 1, &sep_extents);
+        const sep_w: u16 = @intCast(sep_extents.xOff);
+        const sep_total_w: u16 = sep_w + SEPARATOR_PAD * 2;
+        var separator_color = xftColorFromU32(0x505060);
+
         var status_x: u16 = bar_width;
         // Iterate blocks in reverse (rightmost first)
         var bi: usize = status_block_count;
+        // Track whether we've drawn at least one visible block (to decide if separator is needed)
+        var drawn_count: usize = 0;
         while (bi > 0) {
             bi -= 1;
             const blk = &status_blocks[bi];
@@ -555,18 +578,37 @@ fn drawBar(
             var extents: c.XGlyphInfo = undefined;
             c.XftTextExtentsUtf8(dpy, font, ft.ptr, @intCast(ft.len), &extents);
             const text_w: u16 = @intCast(extents.xOff);
+            // Account for separator to the left of this block (all except rightmost)
+            const need_sep = drawn_count > 0;
+            const sep_cost: u16 = if (need_sep) sep_total_w else 0;
             const block_w: u16 = text_w + STATUS_PAD * 2;
+            const total_cost = block_w + sep_cost;
 
-            if (status_x < block_w) break; // no room
+            if (status_x < total_cost) break; // no room
+
+            // Draw separator first (to the left of the previous block's left edge)
+            if (need_sep) {
+                status_x -= sep_total_w;
+                c.XftDrawStringUtf8(draw, &separator_color, font, @intCast(status_x + SEPARATOR_PAD), text_y, sep_str.ptr, 1);
+            }
+
             status_x -= block_w;
 
             // Record render position for click detection (per-bar)
             bar.block_render_x[bi] = status_x;
             bar.block_render_w[bi] = block_w;
 
-            // Draw text
-            c.XftDrawStringUtf8(draw, fg_color, font, @intCast(status_x + STATUS_PAD), text_y, ft.ptr, @intCast(ft.len));
+            // Draw text with per-block color (0 = use default fg_color)
+            var text_color: c.XftColor = undefined;
+            const color_ptr: *c.XftColor = if (blk.color != 0) blk: {
+                text_color = xftColorFromU32(blk.color);
+                break :blk &text_color;
+            } else fg_color;
+            c.XftDrawStringUtf8(draw, color_ptr, font, @intCast(status_x + STATUS_PAD), text_y, ft.ptr, @intCast(ft.len));
+
+            drawn_count += 1;
         }
+        _ = &separator_color; // suppress unused warning if no blocks
     }
 
     _ = c.XSync(dpy, 0);
