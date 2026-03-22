@@ -311,8 +311,8 @@ fn relayoutAndRender(ctx: *EventContext) void {
     var bar_height: u32 = 0;
     var bar_top: bool = true;
     if (cfg) |c_cfg| {
-        if (c_cfg.bar.status_command.len > 0) {
-            bar_height = 20;
+        if (c_cfg.bar.enabled) {
+            bar_height = c_cfg.bar.height;
             bar_top = !std.mem.eql(u8, c_cfg.bar.position, "bottom");
         }
     }

@@ -245,7 +245,9 @@ fn buildBarConfigJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
     jsonEscapeWrite(w, cfg.bar.position) catch return "{}";
     w.writeAll("\",\"status_command\":\"") catch return "{}";
     jsonEscapeWrite(w, cfg.bar.status_command) catch return "{}";
-    w.writeAll("\",\"bar_height\":20,\"colors\":{\"background\":\"") catch return "{}";
+    w.writeAll("\",\"bar_height\":") catch return "{}";
+    w.print("{d}", .{cfg.bar.height}) catch return "{}";
+    w.writeAll(",\"colors\":{\"background\":\"") catch return "{}";
     jsonEscapeWrite(w, cfg.bar.bg_color) catch return "{}";
     w.writeAll("\",\"statusline\":\"") catch return "{}";
     jsonEscapeWrite(w, cfg.bar.statusline_color) catch return "{}";
@@ -729,7 +731,7 @@ pub fn main() !void {
 
     // 11a. Spawn bar if configured
     if (config) |cfg| {
-        if (cfg.bar.status_command.len > 0) {
+        if (cfg.bar.enabled) {
             bar.spawnBar(cfg.bar.status_command, cfg.bar.position);
         }
     }
