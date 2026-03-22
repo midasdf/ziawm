@@ -88,6 +88,9 @@ const default_config =
     \\bindsym $mod+Shift+c reload
     \\bindsym $mod+Shift+e exit
     \\
+    \\# IME
+    \\exec_always fcitx5 -d -r
+    \\
     \\# Bar (built-in status modules, no external status_command needed)
     \\bar {
     \\    position top

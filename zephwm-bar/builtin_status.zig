@@ -113,15 +113,11 @@ pub fn updateAll(state: *ModuleState, now: i64, display: ?*anyopaque, root_windo
             const mem_text = std.fmt.bufPrint(&mem_text_buf, "MEM {s}", .{mem_fmt.slice()}) catch "MEM ?";
             outputs[MOD_MEM].set(mem_text, ModuleState.MEM_COLOR);
 
-            // SW module - hide if no swap used
-            if (info.swap_used_kb > 0) {
-                const sw_fmt = formatKB(info.swap_used_kb);
-                var sw_text_buf: [16]u8 = undefined;
-                const sw_text = std.fmt.bufPrint(&sw_text_buf, "SW {s}", .{sw_fmt.slice()}) catch "SW ?";
-                outputs[MOD_SW].set(sw_text, ModuleState.SWAP_COLOR);
-            } else {
-                outputs[MOD_SW].hide();
-            }
+            // SW module - always show
+            const sw_fmt = formatKB(info.swap_used_kb);
+            var sw_text_buf: [16]u8 = undefined;
+            const sw_text = std.fmt.bufPrint(&sw_text_buf, "SW {s}", .{sw_fmt.slice()}) catch "SW ?";
+            outputs[MOD_SW].set(sw_text, ModuleState.SWAP_COLOR);
             state.dirty = true;
         }
     }
