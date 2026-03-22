@@ -25,10 +25,12 @@ pub const Keybind = struct {
 };
 
 pub const BarConfig = struct {
+    enabled: bool = false,
     status_command: []const u8 = "",
     position: []const u8 = "bottom",
     bg_color: []const u8 = "#222222",
     statusline_color: []const u8 = "#dddddd",
+    height: u16 = 16,
 };
 
 pub const WindowRule = struct {
@@ -462,6 +464,7 @@ pub const Config = struct {
             // bar {
             if (std.mem.eql(u8, line, "bar {") or std.mem.startsWith(u8, line, "bar {")) {
                 in_bar = true;
+                cfg.bar.enabled = true;
                 continue;
             }
 
