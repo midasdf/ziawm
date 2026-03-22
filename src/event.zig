@@ -370,6 +370,9 @@ fn relayoutAndRender(ctx: *EventContext) void {
     // Send synthetic ConfigureNotify to all managed windows (ICCCM requirement).
     // Reparented clients need this to know their actual screen position and size.
     sendConfigureNotifyAll(ctx);
+
+    // Flush to ensure synthetic ConfigureNotify events are delivered promptly.
+    _ = xcb.flush(ctx.conn);
 }
 
 // --- EWMH property update helpers ---
@@ -653,9 +656,11 @@ fn freeWindowStrings(allocator: std.mem.Allocator, con: *tree.Container) void {
 
 fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     const window = ev.window;
+    std.debug.print("MapRequest: win=0x{x}\n", .{window});
 
     // Check if already managed
     if (findContainerByWindow(ctx,window) != null) {
+        std.debug.print("MapRequest: already managed 0x{x}\n", .{window});
         _ = xcb.mapWindow(ctx.conn, window);
         return;
     }
@@ -712,6 +717,10 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     // Add client to save-set for crash recovery (ICCCM requirement)
     _ = xcb.c.xcb_change_save_set(ctx.conn, xcb.c.XCB_SET_MODE_INSERT, window);
 
+    // Set bit gravity on client to prevent content flash during resize
+    const gravity_vals = [_]u32{xcb.c.XCB_GRAVITY_NORTH_WEST};
+    _ = xcb.changeWindowAttributes(ctx.conn, window, xcb.c.XCB_CW_BIT_GRAVITY, &gravity_vals);
+
     // Reparent client window into frame
     _ = xcb.c.xcb_reparent_window(ctx.conn, window, frame_id, 0, 0);
 
@@ -724,7 +733,7 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
         .window_type = win_type,
         .window_role = win_role,
         .transient_for = transient,
-        .pending_unmap = 1, // absorb synthetic UnmapNotify from reparent
+        .pending_unmap = 0, // Window is unmapped at MapRequest time; reparent of unmapped window does not generate UnmapNotify
     };
     con.is_floating = should_float;
     // Apply default border style from config
@@ -733,6 +742,13 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     }
 
     // Register both client and frame in window lookup map
+    std.debug.print("register: client=0x{x} frame=0x{x}\n", .{ window, frame_id });
+    if (ctx.window_map.get(window)) |existing| {
+        std.debug.print("WARNING: client 0x{x} already in map (existing win=0x{x})\n", .{ window, if (existing.window) |ew| ew.id else 0 });
+    }
+    if (ctx.window_map.get(frame_id)) |existing| {
+        std.debug.print("WARNING: frame 0x{x} already in map (existing win=0x{x})\n", .{ frame_id, if (existing.window) |ew| ew.id else 0 });
+    }
     registerWindow(ctx, window, con);
     registerWindow(ctx, frame_id, con);
 
@@ -828,11 +844,21 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     // Set focus to new window
     setFocus(ctx, con);
 
+    // Debug: count children before relayout
+    if (con.parent) |p| {
+        std.debug.print("before relayout: parent has {d} children, type={s}\n", .{ p.children.len(), @tagName(p.type) });
+    }
+
     // Update EWMH properties
     updateAllEwmh(ctx);
 
     // Layout and render
     relayoutAndRender(ctx);
+
+    // Debug: count after
+    if (con.parent) |p| {
+        std.debug.print("after relayout: parent has {d} children\n", .{p.children.len()});
+    }
 
     // Broadcast window new event
     broadcastIpcEvent(ctx, .window, "{\"change\":\"new\"}");
@@ -848,9 +874,17 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
     if (con.window) |*wd_ptr| {
         if (wd_ptr.pending_unmap > 0) {
             wd_ptr.pending_unmap -= 1;
+            std.debug.print("UnmapNotify: absorbed (pending_unmap now {d}) win=0x{x}\n", .{ wd_ptr.pending_unmap, ev.window });
+            return;
+        }
+        // Check if window is mapped by us — if not, ignore
+        if (!wd_ptr.mapped) {
+            std.debug.print("UnmapNotify: ignored (not mapped) win=0x{x}\n", .{ev.window});
             return;
         }
     }
+
+    std.debug.print("UnmapNotify: client close win=0x{x} event=0x{x}\n", .{ ev.window, ev.event });
 
     // Client-initiated unmap — reparent client back to root, destroy frame
     _ = xcb.c.xcb_reparent_window(ctx.conn, wd.id, ctx.root_window, @intCast(con.rect.x), @intCast(con.rect.y));
@@ -877,6 +911,7 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
 
 fn handleDestroyNotify(ctx: *EventContext, ev: *xcb.DestroyNotifyEvent) void {
     if (ev.event == ev.window) return;
+    std.debug.print("DestroyNotify: win=0x{x} event=0x{x}\n", .{ ev.window, ev.event });
 
     const con = findContainerByWindow(ctx, ev.window) orelse return;
 
@@ -1260,9 +1295,21 @@ fn sendConfigureNotify(ctx: *EventContext, con: *tree.Container) void {
     const wd = con.window orelse return;
     const r = con.window_rect;
 
-    // Compute effective border for screen-absolute position
+    // Compute effective border — must match applyWindow's logic exactly,
+    // including hide_edge_borders, so the synthetic ConfigureNotify reports
+    // the same size the client was actually configured with.
     const eb: i32 = blk: {
         if (con.border_style == .none) break :blk 0;
+        // hide_edge_borders: border is 0 when window is the only tiling child
+        if (ctx.config) |cfg| {
+            if (cfg.hide_edge_borders != .none and !con.is_floating) {
+                if (con.parent) |parent| {
+                    if (parent.type == .workspace and parent.tilingChildCount() == 1) {
+                        break :blk 0;
+                    }
+                }
+            }
+        }
         if (con.border_width_override >= 0) break :blk @intCast(con.border_width_override);
         if (ctx.config) |c| break :blk @intCast(c.border_px);
         break :blk 1;

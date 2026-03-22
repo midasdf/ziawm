@@ -559,6 +559,9 @@ fn mapSubtree(conn: *xcb.Connection, con: *tree.Container) void {
         if (con.window) |*win_data| {
             if (win_data.frame_id != 0) {
                 _ = xcb.mapWindow(conn, win_data.frame_id);
+                // Also map client window inside frame — it may have been
+                // unmapped by the client or lost its map state.
+                _ = xcb.mapWindow(conn, win_data.id);
             } else {
                 _ = xcb.mapWindow(conn, win_data.id);
             }
@@ -598,11 +601,17 @@ pub fn unmapSubtree(conn: *xcb.Connection, con: *tree.Container) void {
         if (con.window) |*win_data| {
             if (win_data.mapped) {
                 if (win_data.frame_id != 0) {
+                    // Unmap the frame — children become invisible but their
+                    // X11 map state is preserved. Do NOT increment pending_unmap
+                    // because the client itself does not receive UnmapNotify
+                    // when its parent is unmapped.
                     _ = xcb.unmapWindow(conn, win_data.frame_id);
                 } else {
+                    // No frame — unmap client directly. This DOES generate
+                    // UnmapNotify for the client, so increment counter.
                     _ = xcb.unmapWindow(conn, win_data.id);
+                    win_data.pending_unmap +|= 1;
                 }
-                win_data.pending_unmap +|= 1;
                 win_data.mapped = false;
             }
         }

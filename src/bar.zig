@@ -20,6 +20,7 @@ pub fn spawnBar(status_command: []const u8, position: []const u8) void {
     // Kill previous bar if any
     killBar();
 
+    // Build null-terminated status_command string
     var cmd_buf: [512]u8 = undefined;
     const cmd_len = @min(status_command.len, cmd_buf.len - 1);
     @memcpy(cmd_buf[0..cmd_len], status_command[0..cmd_len]);
@@ -31,18 +32,34 @@ pub fn spawnBar(status_command: []const u8, position: []const u8) void {
         // Child process
         _ = setsid();
 
+        // Redirect stderr to /dev/null to prevent tty pollution
+        // (stdout is kept — zephwm-bar may use it for status protocol)
+        const devnull = std.posix.open("/dev/null", .{ .ACCMODE = .WRONLY }, 0) catch -1;
+        if (devnull >= 0) {
+            _ = std.posix.dup2(@intCast(devnull), 2) catch {}; // stderr only
+            std.posix.close(@intCast(devnull));
+        }
+
         // Close inherited fds > stderr
         var fd: c_int = 3;
         while (fd < 256) : (fd += 1) {
             _ = std.c.close(fd);
         }
 
+        // Launch zephwm-bar with status_command as argument
         const argv = [_:null]?[*:0]const u8{
+            "zephwm-bar",
+            cmd_z,
+        };
+        _ = execvp("zephwm-bar", &argv);
+
+        // Fallback: run status_command directly via shell
+        const sh_argv = [_:null]?[*:0]const u8{
             "/bin/sh",
             "-c",
             cmd_z,
         };
-        _ = execvp("/bin/sh", &argv);
+        _ = execvp("/bin/sh", &sh_argv);
         std.c._exit(1);
     }
     bar_pid = pid;
