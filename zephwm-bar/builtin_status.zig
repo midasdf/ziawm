@@ -141,10 +141,10 @@ pub fn updateAll(state: *ModuleState, now: i64, display: ?*anyopaque, root_windo
             if (getSsid(iface_name)) |ssid_raw| {
                 const ssid = truncateSsid(ssid_raw.slice());
                 var wifi_text_buf: [48]u8 = undefined;
-                const wifi_text = std.fmt.bufPrint(&wifi_text_buf, "W:{s}", .{ssid.slice()}) catch "W:?";
+                const wifi_text = std.fmt.bufPrint(&wifi_text_buf, "WiFi {s}", .{ssid.slice()}) catch "WiFi ?";
                 outputs[MOD_WIFI].set(wifi_text, ModuleState.NET_COLOR);
             } else {
-                outputs[MOD_WIFI].set("W:---", ModuleState.NET_OFF_COLOR);
+                outputs[MOD_WIFI].set("No WiFi", ModuleState.NET_OFF_COLOR);
             }
         } else {
             outputs[MOD_WIFI].hide();
@@ -172,8 +172,8 @@ pub fn updateAll(state: *ModuleState, now: i64, display: ?*anyopaque, root_windo
 
         const ime_state = readImeProperty(display.?, root_window);
         switch (ime_state) {
-            .japanese => outputs[MOD_IME].set("JP", ModuleState.IME_COLOR),
-            .direct => outputs[MOD_IME].set("EN", ModuleState.IME_COLOR),
+            .japanese => outputs[MOD_IME].set("\xe3\x81\x82", ModuleState.IME_COLOR), // あ
+            .direct => outputs[MOD_IME].set("A", ModuleState.IME_COLOR),
             .unavailable => outputs[MOD_IME].hide(),
         }
         state.dirty = true;
