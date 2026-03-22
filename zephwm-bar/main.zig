@@ -381,7 +381,7 @@ pub fn main() !void {
             // Built-in status mode: update modules based on elapsed time
             const now = std.time.timestamp();
             module_state.dirty = false;
-            builtin_status.updateAll(&module_state, now, @ptrCast(dpy), @intCast(root), &module_outputs);
+            builtin_status.updateAll(&module_state, now, &module_outputs);
 
             if (module_state.dirty) {
                 // Convert ModuleOutput array to StatusBlock array

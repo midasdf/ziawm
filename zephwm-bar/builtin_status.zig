@@ -77,7 +77,7 @@ pub fn readFileContent(path: []const u8, buf: []u8) ?[]const u8 {
 
 /// Update all built-in status modules based on elapsed time.
 /// Module order: CPU(0), MEM(1), SW(2), WiFi(3), BAT(4), IME(5), Clock(6).
-pub fn updateAll(state: *ModuleState, now: i64, display: ?*anyopaque, root_window: u64, outputs: *[MODULE_COUNT]ModuleOutput) void {
+pub fn updateAll(state: *ModuleState, now: i64, outputs: *[MODULE_COUNT]ModuleOutput) void {
     // --- CPU (index 0) ---
     if (now - state.cpu_last >= ModuleState.CPU_INTERVAL) {
         state.cpu_last = now;
@@ -152,7 +152,8 @@ pub fn updateAll(state: *ModuleState, now: i64, display: ?*anyopaque, root_windo
     if (now - state.bat_last >= ModuleState.BAT_INTERVAL) {
         state.bat_last = now;
 
-        if (findBatteryCapacity()) |cap| {
+        if (findBatteryCapacity()) |raw_cap| {
+            const cap = @min(raw_cap, 100); // clamp fuel gauge overshoot
             var bat_text_buf: [16]u8 = undefined;
             const bat_text = std.fmt.bufPrint(&bat_text_buf, "BAT {d}%", .{cap}) catch "BAT ?%";
             outputs[MOD_BAT].set(bat_text, batColor(cap));
@@ -163,18 +164,16 @@ pub fn updateAll(state: *ModuleState, now: i64, display: ?*anyopaque, root_windo
     }
 
     // --- IME (index 5) ---
-    if (display != null and now - state.ime_last >= ModuleState.IME_INTERVAL) {
+    if (now - state.ime_last >= ModuleState.IME_INTERVAL) {
         state.ime_last = now;
 
-        const ime_state = readImeProperty(display.?, root_window);
+        const ime_state = getImeStateViaRemote();
         switch (ime_state) {
             .japanese => outputs[MOD_IME].set("\xe3\x81\x82", ModuleState.IME_COLOR), // あ
             .direct => outputs[MOD_IME].set("A", ModuleState.IME_COLOR),
             .unavailable => outputs[MOD_IME].hide(),
         }
         state.dirty = true;
-    } else if (display == null) {
-        outputs[MOD_IME].hide();
     }
 
     // --- Clock (index 6) ---
@@ -308,7 +307,29 @@ pub fn discoverWirelessInterface() ?[16]u8 {
 
 // --- Task 16: IME X property reading ---
 
-/// Read the _FCITX_CURRENT_IM property from the X root window.
+/// Get IME state by running fcitx5-remote -n.
+/// Returns the IM name classification (japanese, direct, or unavailable).
+pub fn getImeStateViaRemote() ImeState {
+    const argv: []const []const u8 = &.{ "fcitx5-remote", "-n" };
+    var child = std.process.Child.init(argv, std.heap.page_allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    child.spawn() catch return .unavailable;
+
+    var buf: [128]u8 = undefined;
+    const stdout = child.stdout orelse {
+        _ = child.wait() catch {};
+        return .unavailable;
+    };
+    const n = stdout.read(&buf) catch 0;
+    _ = child.wait() catch {};
+
+    if (n == 0) return .unavailable;
+    const im_name = std.mem.trimRight(u8, buf[0..n], &.{ '\n', ' ' });
+    return classifyIme(im_name);
+}
+
+/// Read the _FCITX_CURRENT_IM property from the X root window (legacy).
 /// Returns the IME classification (japanese, direct, or unavailable).
 pub fn readImeProperty(display: *anyopaque, root: u64) ImeState {
     const dpy: *x11.Display = @ptrCast(@alignCast(display));
