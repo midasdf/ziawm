@@ -113,10 +113,9 @@ pub fn updateAll(state: *ModuleState, now: i64, outputs: *[MODULE_COUNT]ModuleOu
             const mem_text = std.fmt.bufPrint(&mem_text_buf, "MEM {s}", .{mem_fmt.slice()}) catch "MEM ?";
             outputs[MOD_MEM].set(mem_text, ModuleState.MEM_COLOR);
 
-            // SW module - always show
-            const sw_fmt = formatKB(info.swap_used_kb);
+            // SW module - always show in MB
             var sw_text_buf: [16]u8 = undefined;
-            const sw_text = std.fmt.bufPrint(&sw_text_buf, "SW {s}", .{sw_fmt.slice()}) catch "SW ?";
+            const sw_text = std.fmt.bufPrint(&sw_text_buf, "SW {d}M", .{info.swap_used_kb / 1024}) catch "SW ?";
             outputs[MOD_SW].set(sw_text, ModuleState.SWAP_COLOR);
             state.dirty = true;
         }
