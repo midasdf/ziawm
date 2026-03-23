@@ -125,11 +125,8 @@ pub fn updateAll(state: *ModuleState, now: i64, outputs: *[MODULE_COUNT]ModuleOu
     if (now - state.net_last >= ModuleState.NET_INTERVAL) {
         state.net_last = now;
 
-        // Discover wireless interface on first call
-        if (!state.wifi_iface_discovered) {
-            state.wifi_iface_discovered = true;
-            state.wifi_iface = discoverWirelessInterface();
-        }
+        // Re-discover wireless interface periodically (handles hotplug / operstate changes)
+        state.wifi_iface = discoverWirelessInterface();
 
         if (state.wifi_iface) |iface| {
             const iface_name = std.mem.sliceTo(&iface, 0);
@@ -278,11 +275,14 @@ pub fn getSsid(iface_name: []const u8) ?SsidBuf {
     return result;
 }
 
-/// Discover the first wireless interface by checking /sys/class/net/*/wireless/.
+/// Discover a wireless interface by checking /sys/class/net/*/wireless/.
+/// Prefers an interface whose operstate is "up" over a down one.
 pub fn discoverWirelessInterface() ?[16]u8 {
     const base_path = "/sys/class/net";
     var dir = std.fs.openDirAbsolute(base_path, .{ .iterate = true }) catch return null;
     defer dir.close();
+
+    var fallback: ?[16]u8 = null;
 
     var iter = dir.iterate();
     while (iter.next() catch null) |entry| {
@@ -295,13 +295,28 @@ pub fn discoverWirelessInterface() ?[16]u8 {
         // Try to stat the wireless directory
         std.fs.accessAbsolute(check_path, .{}) catch continue;
 
-        // Found a wireless interface
+        // Found a wireless interface — check if it's up
         var result: [16]u8 = .{0} ** 16;
         const name_len = @min(entry.name.len, 15);
         @memcpy(result[0..name_len], entry.name[0..name_len]);
-        return result;
+
+        var oper_path_buf: [128]u8 = undefined;
+        const oper_path = std.fmt.bufPrint(&oper_path_buf, "{s}/{s}/operstate", .{ base_path, entry.name }) catch {
+            if (fallback == null) fallback = result;
+            continue;
+        };
+        var oper_buf: [16]u8 = undefined;
+        const oper_content = readFileContent(oper_path, &oper_buf) orelse {
+            if (fallback == null) fallback = result;
+            continue;
+        };
+        const oper = std.mem.trimRight(u8, oper_content, &.{ '\n', ' ' });
+        if (std.mem.eql(u8, oper, "up")) {
+            return result; // Prefer the up interface
+        }
+        if (fallback == null) fallback = result;
     }
-    return null;
+    return fallback;
 }
 
 // --- Task 16: IME X property reading ---
