@@ -88,13 +88,18 @@ pub fn updateAll(state: *ModuleState, now: i64, outputs: *[MODULE_COUNT]ModuleOu
             if (lines.next()) |first_line| {
                 if (std.mem.startsWith(u8, first_line, "cpu ")) {
                     const curr = CpuSample.parse(first_line);
-                    const pct = cpuPercent(state.cpu_prev, curr);
-                    state.cpu_prev = curr;
+                    if (state.cpu_prev.total() == 0) {
+                        // First sample: store baseline, don't display yet
+                        state.cpu_prev = curr;
+                    } else {
+                        const pct = cpuPercent(state.cpu_prev, curr);
+                        state.cpu_prev = curr;
 
-                    var fmt_buf: [16]u8 = undefined;
-                    const text = std.fmt.bufPrint(&fmt_buf, "CPU {d}%", .{pct}) catch "CPU ?%";
-                    outputs[MOD_CPU].set(text, cpuColor(pct));
-                    state.dirty = true;
+                        var fmt_buf: [16]u8 = undefined;
+                        const text = std.fmt.bufPrint(&fmt_buf, "CPU {d}%", .{pct}) catch "CPU ?%";
+                        outputs[MOD_CPU].set(text, cpuColor(pct));
+                        state.dirty = true;
+                    }
                 }
             }
         }
@@ -448,7 +453,7 @@ pub const CpuSample = struct {
 
 pub fn cpuPercent(prev: CpuSample, curr: CpuSample) u8 {
     const total_diff = curr.total() -| prev.total();
-    const idle_diff = curr.idle -| prev.idle;
+    const idle_diff = (curr.idle + curr.iowait) -| (prev.idle + prev.iowait);
     if (total_diff == 0) return 0;
     return @intCast((total_diff - idle_diff) * 100 / total_diff);
 }

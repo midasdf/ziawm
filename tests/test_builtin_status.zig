@@ -7,7 +7,8 @@ test "parse /proc/stat cpu line" {
     const prev = builtin_status.CpuSample.parse(line1);
     const curr = builtin_status.CpuSample.parse(line2);
     const pct = builtin_status.cpuPercent(prev, curr);
-    try std.testing.expectEqual(@as(u8, 42), pct);
+    // iowait (10 diff) is counted as idle, so: (345 - 210) * 100 / 345 = 39
+    try std.testing.expectEqual(@as(u8, 39), pct);
 }
 
 test "cpu percent zero diff returns 0" {

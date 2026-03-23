@@ -170,6 +170,9 @@ pub const Config = struct {
                     if (cfg.bar_position_owned) cfg.allocator.free(cfg.bar.position);
                     cfg.bar.position = try allocator.dupe(u8, std.mem.trim(u8, line["position ".len..], " \t"));
                     cfg.bar_position_owned = true;
+                } else if (std.mem.startsWith(u8, line, "height ")) {
+                    const raw = std.mem.trim(u8, line["height ".len..], " \t");
+                    cfg.bar.height = std.fmt.parseInt(u16, raw, 10) catch cfg.bar.height;
                 } else if (std.mem.startsWith(u8, line, "colors {") or std.mem.eql(u8, line, "colors {")) {
                     in_bar_colors = true;
                 }

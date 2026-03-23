@@ -300,7 +300,7 @@ fn clearFocusedPath(root: *tree.Container) void {
 }
 
 /// Apply layout and render for a workspace.
-fn relayoutAndRender(ctx: *EventContext) void {
+pub fn relayoutAndRender(ctx: *EventContext) void {
     // Apply layout to all workspaces
     const cfg = ctx.config;
     const gap: u32 = if (cfg) |c| c.gap_inner else 0;

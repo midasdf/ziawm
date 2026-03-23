@@ -71,7 +71,6 @@ const default_config =
     \\
     \\# Floating
     \\bindsym $mod+Shift+space floating toggle
-    \\bindsym $mod+space focus mode_toggle
     \\
     \\# Workspaces
     \\bindsym $mod+1 workspace 1
@@ -486,12 +485,12 @@ fn loadConfig(allocator: std.mem.Allocator) ?config_mod.Config {
         const file = std.fs.createFileAbsolute(config_path, .{}) catch break :blk false;
         defer file.close();
         file.writeAll(default_config) catch break :blk false;
-        std.debug.print("zephwm: generated default config at {s}\n", .{config_path});
+        std.log.info("zephwm: generated default config at {s}", .{config_path});
         break :blk true;
     } else false;
 
     if (!wrote_file) {
-        std.debug.print("zephwm: no config found and could not write default config, using in-memory defaults\n", .{});
+        std.log.warn("zephwm: no config found and could not write default config, using in-memory defaults", .{});
     }
 
     return config_mod.Config.parse(allocator, default_config) catch null;
@@ -970,6 +969,8 @@ pub fn main() !void {
                                 if (cfg.bar.enabled) {
                                     bar.spawnBar(cfg.bar.status_command, cfg.bar.position);
                                 }
+                                // Recalculate bar reservation and relayout all workspaces
+                                event.relayoutAndRender(&ctx);
                             } else {
                                 ctx.config = null;
                             }
