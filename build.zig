@@ -45,6 +45,15 @@ pub fn build(b: *std.Build) void {
     msg_exe.linkLibC();
     b.installArtifact(msg_exe);
 
+    // builtin_status module (needs libc for ioctl/localtime_r, X11 for IME property)
+    const builtin_status_mod = b.createModule(.{
+        .root_source_file = b.path("zephwm-bar/builtin_status.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    builtin_status_mod.linkSystemLibrary("X11", .{});
+
     // --- zephwm-bar ---
     const bar_exe = b.addExecutable(.{
         .name = "zephwm-bar",
@@ -54,6 +63,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "ipc", .module = ipc_mod },
+                .{ .name = "builtin_status", .module = builtin_status_mod },
             },
         }),
     });
@@ -254,6 +264,20 @@ pub fn build(b: *std.Build) void {
     });
     const run_scratchpad_tests = b.addRunArtifact(scratchpad_tests);
     test_step.dependOn(&run_scratchpad_tests.step);
+
+    // builtin_status tests
+    const builtin_status_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_builtin_status.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "builtin_status", .module = builtin_status_mod },
+            },
+        }),
+    });
+    const run_builtin_status_tests = b.addRunArtifact(builtin_status_tests);
+    test_step.dependOn(&run_builtin_status_tests.step);
 
     // Run steps
     const run_zephwm = b.addRunArtifact(zephwm_exe);

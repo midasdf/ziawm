@@ -3,6 +3,7 @@
 // Supports per-output bars: one bar window per monitor output.
 const std = @import("std");
 const ipc = @import("ipc");
+const builtin_status = @import("builtin_status");
 
 const c = @cImport({
     @cInclude("xcb/xcb.h");
@@ -14,18 +15,20 @@ const c = @cImport({
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
 const VERSION = "0.1.0";
-const BAR_HEIGHT: u16 = 20;
+const BAR_HEIGHT: u16 = 16;
 const WS_BUTTON_PAD: u16 = 10; // horizontal padding per workspace button
 const STATUS_PAD: u16 = 8;
 
 // Colors
-const BG_COLOR: u32 = 0x222222;
+const BG_COLOR: u32 = 0x1a1a2e;
 const FG_COLOR_STR = "#dddddd";
-const FOCUSED_BG: u32 = 0x285577;
+const FOCUSED_BG: u32 = 0x4a6fa5;
 const FOCUSED_FG_STR = "#ffffff";
 const URGENT_BG: u32 = 0x900000;
-const UNFOCUSED_FG_STR = "#888888";
-const FONT_NAME = "monospace:size=10";
+const UNFOCUSED_FG_STR = "#606060";
+const SEPARATOR_COLOR_STR = "#505060";
+const SEPARATOR_PAD: u16 = 4;
+const FONT_NAME = "monospace:size=8";
 
 const MAX_OUTPUTS = 8;
 const MaxWorkspaces = 16;
@@ -55,6 +58,7 @@ const StatusBlock = struct {
     instance_len: u8 = 0,
     full_text: [256]u8 = undefined,
     full_text_len: u16 = 0,
+    color: u32 = 0, // 0xRRGGBB, 0 = use default FG_COLOR
 };
 
 const MAX_STATUS_BLOCKS = 32;
@@ -246,6 +250,7 @@ pub fn main() !void {
 
     // Spawn status_command and read from its stdout via pipe
     var status_pipe_fd: std.posix.fd_t = -1;
+    var status_command_len: usize = 0;
     {
         // Get status_command from bar config via IPC
         const bar_cfg = ipc.sendRequest(allocator, sock_path, .get_bar_config, "") orelse null;
@@ -261,12 +266,23 @@ pub fn main() !void {
             }
         }
         if (status_cmd) |cmd| {
+            status_command_len = cmd.len;
             if (cmd.len > 0) {
                 const spawn_result = spawnStatusCommand(cmd);
                 status_pipe_fd = spawn_result.stdout_fd;
                 status_stdin_fd = spawn_result.stdin_fd;
             }
         }
+    }
+
+    // Built-in status mode: when no status_command is configured, use built-in modules
+    const builtin_mode = (status_command_len == 0);
+    var module_state = builtin_status.ModuleState{};
+    var module_outputs: [builtin_status.MODULE_COUNT]builtin_status.ModuleOutput = undefined;
+    for (&module_outputs) |*o| o.* = .{};
+
+    if (builtin_mode) {
+        std.debug.print("zephwm-bar: built-in status mode (no status_command)\n", .{});
     }
 
     // Workspace info cache
@@ -361,18 +377,42 @@ pub fn main() !void {
 
         if (c.xcb_connection_has_error(conn) != 0) break;
 
-        // Read status command output (non-blocking)
-        if (status_pipe_fd >= 0) {
-            const prev_click_enabled = click_events_enabled;
-            parseStatusUpdate(status_pipe_fd, &status_blocks, &status_block_count, &click_events_enabled, &json_mode, &status_read_buf, &status_read_len);
-            // When click_events first enabled, send the opening bracket
-            if (click_events_enabled and !prev_click_enabled and status_stdin_fd >= 0) {
-                _ = std.posix.write(status_stdin_fd, "[\n") catch {};
+        if (builtin_mode) {
+            // Built-in status mode: update modules based on elapsed time
+            const now = std.time.timestamp();
+            module_state.dirty = false;
+            builtin_status.updateAll(&module_state, now, &module_outputs);
+
+            if (module_state.dirty) {
+                // Convert ModuleOutput array to StatusBlock array
+                status_block_count = 0;
+                for (0..builtin_status.MODULE_COUNT) |i| {
+                    const mod = &module_outputs[i];
+                    if (mod.text_len == 0) continue; // skip hidden modules
+                    const idx = status_block_count;
+                    status_blocks[idx] = .{};
+                    const tlen = mod.text_len;
+                    @memcpy(status_blocks[idx].full_text[0..tlen], mod.text[0..tlen]);
+                    status_blocks[idx].full_text_len = tlen;
+                    status_blocks[idx].color = mod.color;
+                    status_block_count += 1;
+                }
+            }
+        } else {
+            // External status_command mode: read from pipe (non-blocking)
+            if (status_pipe_fd >= 0) {
+                const prev_click_enabled = click_events_enabled;
+                parseStatusUpdate(status_pipe_fd, &status_blocks, &status_block_count, &click_events_enabled, &json_mode, &status_read_buf, &status_read_len);
+                // When click_events first enabled, send the opening bracket
+                if (click_events_enabled and !prev_click_enabled and status_stdin_fd >= 0) {
+                    _ = std.posix.write(status_stdin_fd, "[\n") catch {};
+                }
             }
         }
 
         // Refresh workspace state on timeout or after processing events
         refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, &ws_count);
+        // Redraw all bars (workspace refresh always triggers redraw)
         for (bars[0..bar_count]) |*bar| {
             drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, &focused_fg, &unfocused_fg, &fg_color);
         }
@@ -467,6 +507,19 @@ fn findNumEnd(data: []const u8, start: usize) usize {
     return i;
 }
 
+/// Convert a packed 0xRRGGBB u32 to XftColor without a server round-trip.
+fn xftColorFromU32(pixel: u32) c.XftColor {
+    return .{
+        .pixel = pixel,
+        .color = .{
+            .red = @as(u16, @intCast((pixel >> 16) & 0xFF)) * 257,
+            .green = @as(u16, @intCast((pixel >> 8) & 0xFF)) * 257,
+            .blue = @as(u16, @intCast(pixel & 0xFF)) * 257,
+            .alpha = 0xFFFF,
+        },
+    };
+}
+
 fn drawBar(
     conn: *c.xcb_connection_t,
     dpy: *c.Display,
@@ -541,9 +594,18 @@ fn drawBar(
 
     // Draw status blocks (right-to-left)
     if (status_block_count > 0) {
+        const sep_str = "|";
+        var sep_extents: c.XGlyphInfo = undefined;
+        c.XftTextExtentsUtf8(dpy, font, sep_str.ptr, 1, &sep_extents);
+        const sep_w: u16 = @intCast(sep_extents.xOff);
+        const sep_total_w: u16 = sep_w + SEPARATOR_PAD * 2;
+        var separator_color = xftColorFromU32(0x505060);
+
         var status_x: u16 = bar_width;
         // Iterate blocks in reverse (rightmost first)
         var bi: usize = status_block_count;
+        // Track whether we've drawn at least one visible block (to decide if separator is needed)
+        var drawn_count: usize = 0;
         while (bi > 0) {
             bi -= 1;
             const blk = &status_blocks[bi];
@@ -553,18 +615,37 @@ fn drawBar(
             var extents: c.XGlyphInfo = undefined;
             c.XftTextExtentsUtf8(dpy, font, ft.ptr, @intCast(ft.len), &extents);
             const text_w: u16 = @intCast(extents.xOff);
+            // Account for separator to the left of this block (all except rightmost)
+            const need_sep = drawn_count > 0;
+            const sep_cost: u16 = if (need_sep) sep_total_w else 0;
             const block_w: u16 = text_w + STATUS_PAD * 2;
+            const total_cost = block_w + sep_cost;
 
-            if (status_x < block_w) break; // no room
+            if (status_x < total_cost) break; // no room
+
+            // Draw separator first (to the left of the previous block's left edge)
+            if (need_sep) {
+                status_x -= sep_total_w;
+                c.XftDrawStringUtf8(draw, &separator_color, font, @intCast(status_x + SEPARATOR_PAD), text_y, sep_str.ptr, 1);
+            }
+
             status_x -= block_w;
 
             // Record render position for click detection (per-bar)
             bar.block_render_x[bi] = status_x;
             bar.block_render_w[bi] = block_w;
 
-            // Draw text
-            c.XftDrawStringUtf8(draw, fg_color, font, @intCast(status_x + STATUS_PAD), text_y, ft.ptr, @intCast(ft.len));
+            // Draw text with per-block color (0 = use default fg_color)
+            var text_color: c.XftColor = undefined;
+            const color_ptr: *c.XftColor = if (blk.color != 0) blk: {
+                text_color = xftColorFromU32(blk.color);
+                break :blk &text_color;
+            } else fg_color;
+            c.XftDrawStringUtf8(draw, color_ptr, font, @intCast(status_x + STATUS_PAD), text_y, ft.ptr, @intCast(ft.len));
+
+            drawn_count += 1;
         }
+        _ = &separator_color; // suppress unused warning if no blocks
     }
 
     _ = c.XSync(dpy, 0);

@@ -13,9 +13,7 @@ var bar_pid: std.posix.pid_t = 0;
 /// `status_command` is the i3bar-protocol status command (e.g. "i3blocks").
 /// `position` is "top" or "bottom".
 pub fn spawnBar(status_command: []const u8, position: []const u8) void {
-    _ = position; // Bar reads position via IPC GET_BAR_CONFIG at startup
-
-    if (status_command.len == 0) return;
+    const is_bottom = std.mem.eql(u8, position, "bottom");
 
     // Kill previous bar if any
     killBar();
@@ -46,20 +44,33 @@ pub fn spawnBar(status_command: []const u8, position: []const u8) void {
             _ = std.c.close(fd);
         }
 
-        // Launch zephwm-bar with status_command as argument
-        const argv = [_:null]?[*:0]const u8{
-            "zephwm-bar",
-            cmd_z,
-        };
-        _ = execvp("zephwm-bar", &argv);
+        if (cmd_len == 0) {
+            // Built-in status mode: spawn zephwm-bar with optional --bottom
+            if (is_bottom) {
+                const argv = [_:null]?[*:0]const u8{ "zephwm-bar", "--bottom" };
+                _ = execvp("zephwm-bar", &argv);
+            } else {
+                const argv = [_:null]?[*:0]const u8{"zephwm-bar"};
+                _ = execvp("zephwm-bar", &argv);
+            }
+        } else {
+            // Launch zephwm-bar with status_command as argument + optional --bottom
+            if (is_bottom) {
+                const argv = [_:null]?[*:0]const u8{ "zephwm-bar", "--bottom", cmd_z };
+                _ = execvp("zephwm-bar", &argv);
+            } else {
+                const argv = [_:null]?[*:0]const u8{ "zephwm-bar", cmd_z };
+                _ = execvp("zephwm-bar", &argv);
+            }
 
-        // Fallback: run status_command directly via shell
-        const sh_argv = [_:null]?[*:0]const u8{
-            "/bin/sh",
-            "-c",
-            cmd_z,
-        };
-        _ = execvp("/bin/sh", &sh_argv);
+            // Fallback: run status_command directly via shell
+            const sh_argv = [_:null]?[*:0]const u8{
+                "/bin/sh",
+                "-c",
+                cmd_z,
+            };
+            _ = execvp("/bin/sh", &sh_argv);
+        }
         std.c._exit(1);
     }
     bar_pid = pid;

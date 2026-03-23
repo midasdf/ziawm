@@ -215,6 +215,36 @@ test "parse bar block" {
     try std.testing.expectEqualStrings("#ffffff", cfg.bar.statusline_color);
 }
 
+test "bar block sets enabled flag" {
+    const input = "bar {\n    position top\n}\n";
+    var cfg = try config.Config.parse(std.testing.allocator, input);
+    defer cfg.deinit();
+    try std.testing.expect(cfg.bar.enabled);
+    try std.testing.expectEqualStrings("top", cfg.bar.position);
+}
+
+test "bar block parses height" {
+    const input = "bar {\n    position top\n    height 24\n}\n";
+    var cfg = try config.Config.parse(std.testing.allocator, input);
+    defer cfg.deinit();
+    try std.testing.expect(cfg.bar.enabled);
+    try std.testing.expectEqual(@as(u16, 24), cfg.bar.height);
+}
+
+test "bar block uses default height when not specified" {
+    const input = "bar {\n    position top\n}\n";
+    var cfg = try config.Config.parse(std.testing.allocator, input);
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(u16, 16), cfg.bar.height);
+}
+
+test "no bar block leaves enabled false" {
+    const input = "bindsym Mod1+Return exec st\n";
+    var cfg = try config.Config.parse(std.testing.allocator, input);
+    defer cfg.deinit();
+    try std.testing.expect(!cfg.bar.enabled);
+}
+
 test "unknown lines silently skipped" {
     const text =
         \\some_unknown_directive foo bar

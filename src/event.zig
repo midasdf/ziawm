@@ -300,19 +300,19 @@ fn clearFocusedPath(root: *tree.Container) void {
 }
 
 /// Apply layout and render for a workspace.
-fn relayoutAndRender(ctx: *EventContext) void {
+pub fn relayoutAndRender(ctx: *EventContext) void {
     // Apply layout to all workspaces
     const cfg = ctx.config;
     const gap: u32 = if (cfg) |c| c.gap_inner else 0;
     const gap_outer: u32 = if (cfg) |c| c.gap_outer else 0;
     const border: u32 = if (cfg) |c| c.border_px else 1;
 
-    // Reserve space for bar (20px default bar height)
+    // Reserve space for bar (height from config, default 16px)
     var bar_height: u32 = 0;
     var bar_top: bool = true;
     if (cfg) |c_cfg| {
-        if (c_cfg.bar.status_command.len > 0) {
-            bar_height = 20;
+        if (c_cfg.bar.enabled) {
+            bar_height = c_cfg.bar.height;
             bar_top = !std.mem.eql(u8, c_cfg.bar.position, "bottom");
         }
     }
