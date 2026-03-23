@@ -1,5 +1,6 @@
 // Event dispatch — X11 event handling
 const std = @import("std");
+const log = std.log.scoped(.event);
 const xcb = @import("xcb.zig");
 const tree = @import("tree.zig");
 const atoms_mod = @import("atoms.zig");
@@ -83,6 +84,16 @@ fn getWorkspaceOutputName(ws: *tree.Container) []const u8 {
     return "default";
 }
 
+/// Check if any IPC client is subscribed to the given event mask bit.
+fn hasIpcSubscribers(ctx: *EventContext, mask_bit: u8) bool {
+    for (0..MAX_IPC_SUBS) |i| {
+        if (ctx.ipc_sub_fds[i] != -1 and (ctx.ipc_sub_masks[i] & mask_bit) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// Broadcast an IPC event to all subscribed clients.
 pub fn broadcastIpcEvent(ctx: *EventContext, event_type: ipc.EventType, payload: []const u8) void {
     const mask_bit: u8 = switch (event_type) {
@@ -134,9 +145,9 @@ pub fn handleEvent(ctx: *EventContext, event: *xcb.GenericEvent) void {
 }
 
 fn handleRandrScreenChange(ctx: *EventContext) void {
-    std.debug.print("zephwm: RandR screen change detected, updating outputs\n", .{});
+    log.debug("RandR screen change detected, updating outputs", .{});
     output.updateOutputs(ctx.conn, ctx.tree_root, ctx.allocator) catch |err| {
-        std.debug.print("zephwm: failed to update outputs: {}\n", .{err});
+        log.warn("failed to update outputs: {}", .{err});
         return;
     };
     broadcastIpcEvent(ctx, .output, "{\"change\":\"unspecified\"}");
@@ -371,7 +382,7 @@ pub fn relayoutAndRender(ctx: *EventContext) void {
     // Reparented clients need this to know their actual screen position and size.
     sendConfigureNotifyAll(ctx);
 
-    // Flush to ensure synthetic ConfigureNotify events are delivered promptly.
+    // Single flush for the entire relayout cycle: render commands + ConfigureNotify events.
     _ = xcb.flush(ctx.conn);
 }
 
@@ -507,12 +518,53 @@ pub fn updateActiveWindow(ctx: *EventContext, window_id: u32) void {
     );
 }
 
+/// Update _NET_NUMBER_OF_DESKTOPS, _NET_CURRENT_DESKTOP, and _NET_DESKTOP_NAMES
+/// in a single tree walk instead of three separate walks.
+fn updateDesktopEwmhCombined(ctx: *EventContext) void {
+    var ws_count: u32 = 0;
+    var focused_idx: u32 = 0;
+    var name_buf: [1024]u8 = undefined;
+    var name_pos: usize = 0;
+
+    var out_cur = ctx.tree_root.children.first;
+    while (out_cur) |out_con| : (out_cur = out_con.next) {
+        if (out_con.type != .output) continue;
+        var ws_cur = out_con.children.first;
+        while (ws_cur) |ws| : (ws_cur = ws.next) {
+            if (ws.type != .workspace) continue;
+            if (ws.is_focused) focused_idx = ws_count;
+            // Collect name for _NET_DESKTOP_NAMES
+            const name = if (ws.workspace) |wsd| wsd.name else "?";
+            if (name_pos + name.len + 1 <= name_buf.len) {
+                @memcpy(name_buf[name_pos..][0..name.len], name);
+                name_pos += name.len;
+                name_buf[name_pos] = 0;
+                name_pos += 1;
+            }
+            ws_count += 1;
+        }
+    }
+
+    // _NET_NUMBER_OF_DESKTOPS
+    const count_val = [_]u32{ws_count};
+    _ = xcb.changeProperty(ctx.conn, xcb.PROP_MODE_REPLACE, ctx.root_window,
+        ctx.atoms.net_number_of_desktops, xcb.ATOM_CARDINAL, 32, 1, @ptrCast(&count_val));
+
+    // _NET_CURRENT_DESKTOP
+    const idx_val = [_]u32{focused_idx};
+    _ = xcb.changeProperty(ctx.conn, xcb.PROP_MODE_REPLACE, ctx.root_window,
+        ctx.atoms.net_current_desktop, xcb.ATOM_CARDINAL, 32, 1, @ptrCast(&idx_val));
+
+    // _NET_DESKTOP_NAMES
+    _ = xcb.changeProperty(ctx.conn, xcb.PROP_MODE_REPLACE, ctx.root_window,
+        ctx.atoms.net_desktop_names, ctx.atoms.utf8_string, 8, @intCast(name_pos),
+        if (name_pos > 0) @ptrCast(&name_buf) else null);
+}
+
 /// Update all EWMH properties (convenience for after structural changes).
 fn updateAllEwmh(ctx: *EventContext) void {
     updateClientList(ctx);
-    updateNumberOfDesktops(ctx);
-    updateCurrentDesktop(ctx);
-    updateDesktopNames(ctx);
+    updateDesktopEwmhCombined(ctx);
 }
 
 // --- X11 property helpers ---
@@ -534,30 +586,6 @@ fn getStringProperty(conn: *xcb.Connection, window: xcb.Window, property: xcb.At
     return .{ .data = data[0..@intCast(len)], .reply = reply };
 }
 
-/// Read WM_CLASS property (two null-terminated strings: instance, class).
-/// Returns allocator-owned copies of the strings.
-fn readWmClass(allocator: std.mem.Allocator, conn: *xcb.Connection, window: xcb.Window) struct { instance: []const u8, class: []const u8 } {
-    const result = getStringProperty(conn, window, xcb.ATOM_WM_CLASS, xcb.ATOM_STRING) orelse
-        return .{ .instance = "", .class = "" };
-    defer std.c.free(result.reply);
-
-    const data = result.data;
-    // Find first null (end of instance)
-    const null_pos = std.mem.indexOfScalar(u8, data, 0) orelse {
-        return .{ .instance = allocator.dupe(u8, data) catch "", .class = "" };
-    };
-    const instance = allocator.dupe(u8, data[0..null_pos]) catch "";
-    const rest = data[null_pos + 1 ..];
-    // Find second null (end of class) or use rest of data
-    const class_end = std.mem.indexOfScalar(u8, rest, 0) orelse rest.len;
-    const class = allocator.dupe(u8, rest[0..class_end]) catch {
-        // Free instance to avoid leak on class allocation failure
-        if (instance.len > 0) allocator.free(instance);
-        return .{ .instance = "", .class = "" };
-    };
-    return .{ .instance = instance, .class = class };
-}
-
 /// Read window title (_NET_WM_NAME or WM_NAME).
 /// Returns an allocator-owned copy of the string.
 fn readTitle(allocator: std.mem.Allocator, conn: *xcb.Connection, window: xcb.Window, atoms: atoms_mod.Atoms) []const u8 {
@@ -574,68 +602,149 @@ fn readTitle(allocator: std.mem.Allocator, conn: *xcb.Connection, window: xcb.Wi
     return "";
 }
 
-/// Read WM_TRANSIENT_FOR property.
-fn readTransientFor(conn: *xcb.Connection, window: xcb.Window) ?u32 {
-    const cookie = xcb.getProperty(conn, 0, window, xcb.ATOM_WM_TRANSIENT_FOR, xcb.ATOM_WINDOW, 0, 1);
-    const reply = xcb.getPropertyReply(conn, cookie, null) orelse return null;
-    defer std.c.free(reply);
-    const len = xcb.getPropertyValueLength(reply);
-    if (len < 4) return null;
-    const ptr = xcb.getPropertyValue(reply) orelse return null;
-    const win_ptr: *const u32 = @ptrCast(@alignCast(ptr));
-    const win = win_ptr.*;
-    if (win == 0 or win == xcb.WINDOW_NONE) return null;
-    return win;
-}
+/// Result of batched window property reads.
+const BatchedWindowProps = struct {
+    instance: []const u8 = "",
+    class: []const u8 = "",
+    title: []const u8 = "",
+    transient_for: ?u32 = null,
+    window_type: []const u8 = "",
+    window_role: []const u8 = "",
+    should_float: bool = false,
+};
 
-/// Read _NET_WM_WINDOW_TYPE and return a type name string ("normal", "dialog",
-/// "splash", "notification", "toolbar", "menu", "utility", "dock", or "").
-/// Caller owns the returned allocator string (free if len > 0).
-fn readWindowTypeName(allocator: std.mem.Allocator, conn: *xcb.Connection, window: xcb.Window, atoms: atoms_mod.Atoms) []const u8 {
-    const cookie = xcb.getProperty(conn, 0, window, atoms.net_wm_window_type, xcb.ATOM_ATOM, 0, 32);
-    const reply = xcb.getPropertyReply(conn, cookie, null) orelse return "";
-    defer std.c.free(reply);
-    const len = xcb.getPropertyValueLength(reply);
-    if (len <= 0) return "";
-    const ptr = xcb.getPropertyValue(reply) orelse return "";
-    const atom_ptr: [*]const xcb.Atom = @ptrCast(@alignCast(ptr));
-    const count: usize = @intCast(@divTrunc(len, 4));
-    if (count == 0) return "";
-    // Use the first (highest priority) type atom
-    const type_atom = atom_ptr[0];
-    const type_name: []const u8 = if (type_atom == atoms.net_wm_window_type_normal) "normal" else if (type_atom == atoms.net_wm_window_type_dialog) "dialog" else if (type_atom == atoms.net_wm_window_type_splash) "splash" else if (type_atom == atoms.net_wm_window_type_notification) "notification" else if (type_atom == atoms.net_wm_window_type_toolbar) "toolbar" else if (type_atom == atoms.net_wm_window_type_menu) "menu" else if (type_atom == atoms.net_wm_window_type_utility) "utility" else if (type_atom == atoms.net_wm_window_type_dock) "dock" else "";
-    if (type_name.len == 0) return "";
-    return allocator.dupe(u8, type_name) catch "";
-}
+/// Read all window properties in a single batched roundtrip.
+/// Sends all GetProperty cookies at once, then collects replies.
+/// This reduces ~7 synchronous X roundtrips to ~1.
+/// All returned strings are allocator-owned (free with allocator.free if len > 0).
+fn readAllWindowPropertiesBatched(allocator: std.mem.Allocator, conn: *xcb.Connection, window: xcb.Window, atoms: atoms_mod.Atoms) BatchedWindowProps {
+    // Send all cookies at once — XCB pipelines them into a single server roundtrip
+    const class_cookie = xcb.getProperty(conn, 0, window, xcb.ATOM_WM_CLASS, xcb.ATOM_STRING, 0, 256);
+    const net_name_cookie = xcb.getProperty(conn, 0, window, atoms.net_wm_name, atoms.utf8_string, 0, 256);
+    const wm_name_cookie = xcb.getProperty(conn, 0, window, xcb.ATOM_WM_NAME, xcb.ATOM_STRING, 0, 256);
+    const transient_cookie = xcb.getProperty(conn, 0, window, xcb.ATOM_WM_TRANSIENT_FOR, xcb.ATOM_WINDOW, 0, 1);
+    const type_cookie = xcb.getProperty(conn, 0, window, atoms.net_wm_window_type, xcb.ATOM_ATOM, 0, 32);
+    const role_cookie = xcb.getProperty(conn, 0, window, atoms.wm_window_role, xcb.ATOM_STRING, 0, 256);
 
-/// Read WM_WINDOW_ROLE property. Returns allocator-owned string.
-fn readWindowRole(allocator: std.mem.Allocator, conn: *xcb.Connection, window: xcb.Window, atoms: atoms_mod.Atoms) []const u8 {
-    if (getStringProperty(conn, window, atoms.wm_window_role, xcb.ATOM_STRING)) |result| {
-        defer std.c.free(result.reply);
-        return allocator.dupe(u8, result.data) catch "";
-    }
-    return "";
-}
+    var props = BatchedWindowProps{};
 
-/// Check _NET_WM_WINDOW_TYPE for dialog/splash/notification types.
-fn shouldFloatByType(conn: *xcb.Connection, window: xcb.Window, atoms: atoms_mod.Atoms) bool {
-    const cookie = xcb.getProperty(conn, 0, window, atoms.net_wm_window_type, xcb.ATOM_ATOM, 0, 32);
-    const reply = xcb.getPropertyReply(conn, cookie, null) orelse return false;
-    defer std.c.free(reply);
-    const len = xcb.getPropertyValueLength(reply);
-    if (len <= 0) return false;
-    const ptr = xcb.getPropertyValue(reply) orelse return false;
-    const atom_ptr: [*]const xcb.Atom = @ptrCast(@alignCast(ptr));
-    const count: usize = @intCast(@divTrunc(len, 4));
-    for (atom_ptr[0..count]) |atom| {
-        if (atom == atoms.net_wm_window_type_dialog or
-            atom == atoms.net_wm_window_type_splash or
-            atom == atoms.net_wm_window_type_notification)
-        {
-            return true;
+    // 1. WM_CLASS → instance + class
+    if (xcb.getPropertyReply(conn, class_cookie, null)) |reply| {
+        defer std.c.free(reply);
+        const len = xcb.getPropertyValueLength(reply);
+        if (len > 0) {
+            if (xcb.getPropertyValue(reply)) |ptr| {
+                const data: [*]const u8 = @ptrCast(ptr);
+                const data_slice = data[0..@intCast(len)];
+                if (std.mem.indexOfScalar(u8, data_slice, 0)) |null_pos| {
+                    props.instance = allocator.dupe(u8, data_slice[0..null_pos]) catch "";
+                    const rest = data_slice[null_pos + 1 ..];
+                    const class_end = std.mem.indexOfScalar(u8, rest, 0) orelse rest.len;
+                    props.class = allocator.dupe(u8, rest[0..class_end]) catch blk: {
+                        if (props.instance.len > 0) allocator.free(props.instance);
+                        props.instance = "";
+                        break :blk "";
+                    };
+                } else {
+                    props.instance = allocator.dupe(u8, data_slice) catch "";
+                }
+            }
         }
     }
-    return false;
+
+    // 2. Title: try _NET_WM_NAME first, fall back to WM_NAME
+    if (xcb.getPropertyReply(conn, net_name_cookie, null)) |reply| {
+        defer std.c.free(reply);
+        const len = xcb.getPropertyValueLength(reply);
+        if (len > 0) {
+            if (xcb.getPropertyValue(reply)) |ptr| {
+                const data: [*]const u8 = @ptrCast(ptr);
+                props.title = allocator.dupe(u8, data[0..@intCast(len)]) catch "";
+            }
+        }
+    }
+    // Always consume WM_NAME reply to avoid stale replies in the queue
+    if (xcb.getPropertyReply(conn, wm_name_cookie, null)) |reply| {
+        if (props.title.len == 0) {
+            const len = xcb.getPropertyValueLength(reply);
+            if (len > 0) {
+                if (xcb.getPropertyValue(reply)) |ptr| {
+                    const data: [*]const u8 = @ptrCast(ptr);
+                    props.title = allocator.dupe(u8, data[0..@intCast(len)]) catch "";
+                }
+            }
+        }
+        std.c.free(reply);
+    }
+
+    // 3. WM_TRANSIENT_FOR
+    if (xcb.getPropertyReply(conn, transient_cookie, null)) |reply| {
+        defer std.c.free(reply);
+        const len = xcb.getPropertyValueLength(reply);
+        if (len >= 4) {
+            if (xcb.getPropertyValue(reply)) |ptr| {
+                const win_ptr: *const u32 = @ptrCast(@alignCast(ptr));
+                const win = win_ptr.*;
+                if (win != 0 and win != xcb.WINDOW_NONE) {
+                    props.transient_for = win;
+                    props.should_float = true;
+                }
+            }
+        }
+    }
+
+    // 4. _NET_WM_WINDOW_TYPE — used for both type name AND float check (avoids double read)
+    if (xcb.getPropertyReply(conn, type_cookie, null)) |reply| {
+        defer std.c.free(reply);
+        const len = xcb.getPropertyValueLength(reply);
+        if (len > 0) {
+            if (xcb.getPropertyValue(reply)) |ptr| {
+                const atom_ptr: [*]const xcb.Atom = @ptrCast(@alignCast(ptr));
+                const count: usize = @intCast(@divTrunc(len, 4));
+                if (count > 0) {
+                    const type_atom = atom_ptr[0];
+                    const type_name: []const u8 =
+                        if (type_atom == atoms.net_wm_window_type_normal) "normal"
+                    else if (type_atom == atoms.net_wm_window_type_dialog) "dialog"
+                    else if (type_atom == atoms.net_wm_window_type_splash) "splash"
+                    else if (type_atom == atoms.net_wm_window_type_notification) "notification"
+                    else if (type_atom == atoms.net_wm_window_type_toolbar) "toolbar"
+                    else if (type_atom == atoms.net_wm_window_type_menu) "menu"
+                    else if (type_atom == atoms.net_wm_window_type_utility) "utility"
+                    else if (type_atom == atoms.net_wm_window_type_dock) "dock"
+                    else "";
+                    if (type_name.len > 0) {
+                        props.window_type = allocator.dupe(u8, type_name) catch "";
+                    }
+                    if (!props.should_float) {
+                        for (atom_ptr[0..count]) |atom| {
+                            if (atom == atoms.net_wm_window_type_dialog or
+                                atom == atoms.net_wm_window_type_splash or
+                                atom == atoms.net_wm_window_type_notification)
+                            {
+                                props.should_float = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. WM_WINDOW_ROLE
+    if (xcb.getPropertyReply(conn, role_cookie, null)) |reply| {
+        defer std.c.free(reply);
+        const len = xcb.getPropertyValueLength(reply);
+        if (len > 0) {
+            if (xcb.getPropertyValue(reply)) |ptr| {
+                const data: [*]const u8 = @ptrCast(ptr);
+                props.window_role = allocator.dupe(u8, data[0..@intCast(len)]) catch "";
+            }
+        }
+    }
+
+    return props;
 }
 
 /// Free allocator-owned strings stored in a container's WindowData.
@@ -645,10 +754,12 @@ fn freeWindowStrings(allocator: std.mem.Allocator, con: *tree.Container) void {
         if (wd.instance.len > 0) allocator.free(wd.instance);
         if (wd.title.len > 0) allocator.free(wd.title);
         if (wd.window_type.len > 0) allocator.free(wd.window_type);
+        if (wd.window_role.len > 0) allocator.free(wd.window_role);
         wd.class = "";
         wd.instance = "";
         wd.title = "";
         wd.window_type = "";
+        wd.window_role = "";
     }
 }
 
@@ -656,11 +767,11 @@ fn freeWindowStrings(allocator: std.mem.Allocator, con: *tree.Container) void {
 
 fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     const window = ev.window;
-    std.debug.print("MapRequest: win=0x{x}\n", .{window});
+    log.debug("MapRequest: win=0x{x}", .{window});
 
     // Check if already managed
     if (findContainerByWindow(ctx,window) != null) {
-        std.debug.print("MapRequest: already managed 0x{x}\n", .{window});
+        log.debug("MapRequest: already managed 0x{x}", .{window});
         _ = xcb.mapWindow(ctx.conn, window);
         return;
     }
@@ -678,16 +789,8 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     // Create new container
     const con = tree.Container.create(ctx.allocator, .window) catch return;
 
-    // Read window properties (allocator-owned copies)
-    const wm_class = readWmClass(ctx.allocator, ctx.conn, window);
-    const title = readTitle(ctx.allocator, ctx.conn, window, ctx.atoms);
-    const transient = readTransientFor(ctx.conn, window);
-    const win_type = readWindowTypeName(ctx.allocator, ctx.conn, window, ctx.atoms);
-    const win_role = readWindowRole(ctx.allocator, ctx.conn, window, ctx.atoms);
-    var should_float = transient != null;
-    if (!should_float) {
-        should_float = shouldFloatByType(ctx.conn, window, ctx.atoms);
-    }
+    // Read all window properties in a single batched roundtrip (~7 roundtrips → ~1)
+    const props = readAllWindowPropertiesBatched(ctx.allocator, ctx.conn, window, ctx.atoms);
 
     // Create frame window
     const frame_id = xcb.generateId(ctx.conn);
@@ -727,27 +830,27 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     con.window = tree.WindowData{
         .id = window,
         .frame_id = frame_id,
-        .class = wm_class.class,
-        .instance = wm_class.instance,
-        .title = title,
-        .window_type = win_type,
-        .window_role = win_role,
-        .transient_for = transient,
+        .class = props.class,
+        .instance = props.instance,
+        .title = props.title,
+        .window_type = props.window_type,
+        .window_role = props.window_role,
+        .transient_for = props.transient_for,
         .pending_unmap = 0, // Window is unmapped at MapRequest time; reparent of unmapped window does not generate UnmapNotify
     };
-    con.is_floating = should_float;
+    con.is_floating = props.should_float;
     // Apply default border style from config
     if (ctx.config) |cfg| {
         con.border_style = cfg.default_border_style;
     }
 
     // Register both client and frame in window lookup map
-    std.debug.print("register: client=0x{x} frame=0x{x}\n", .{ window, frame_id });
+    log.debug("register: client=0x{x} frame=0x{x}", .{ window, frame_id });
     if (ctx.window_map.get(window)) |existing| {
-        std.debug.print("WARNING: client 0x{x} already in map (existing win=0x{x})\n", .{ window, if (existing.window) |ew| ew.id else 0 });
+        log.warn("client 0x{x} already in map (existing win=0x{x})", .{ window, if (existing.window) |ew| ew.id else 0 });
     }
     if (ctx.window_map.get(frame_id)) |existing| {
-        std.debug.print("WARNING: frame 0x{x} already in map (existing win=0x{x})\n", .{ frame_id, if (existing.window) |ew| ew.id else 0 });
+        log.warn("frame 0x{x} already in map (existing win=0x{x})", .{ frame_id, if (existing.window) |ew| ew.id else 0 });
     }
     registerWindow(ctx, window, con);
     registerWindow(ctx, frame_id, con);
@@ -844,21 +947,11 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     // Set focus to new window
     setFocus(ctx, con);
 
-    // Debug: count children before relayout
-    if (con.parent) |p| {
-        std.debug.print("before relayout: parent has {d} children, type={s}\n", .{ p.children.len(), @tagName(p.type) });
-    }
-
     // Update EWMH properties
     updateAllEwmh(ctx);
 
     // Layout and render
     relayoutAndRender(ctx);
-
-    // Debug: count after
-    if (con.parent) |p| {
-        std.debug.print("after relayout: parent has {d} children\n", .{p.children.len()});
-    }
 
     // Broadcast window new event
     broadcastIpcEvent(ctx, .window, "{\"change\":\"new\"}");
@@ -874,17 +967,17 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
     if (con.window) |*wd_ptr| {
         if (wd_ptr.pending_unmap > 0) {
             wd_ptr.pending_unmap -= 1;
-            std.debug.print("UnmapNotify: absorbed (pending_unmap now {d}) win=0x{x}\n", .{ wd_ptr.pending_unmap, ev.window });
+            log.debug("UnmapNotify: absorbed (pending_unmap now {d}) win=0x{x}", .{ wd_ptr.pending_unmap, ev.window });
             return;
         }
         // Check if window is mapped by us — if not, ignore
         if (!wd_ptr.mapped) {
-            std.debug.print("UnmapNotify: ignored (not mapped) win=0x{x}\n", .{ev.window});
+            log.debug("UnmapNotify: ignored (not mapped) win=0x{x}", .{ev.window});
             return;
         }
     }
 
-    std.debug.print("UnmapNotify: client close win=0x{x} event=0x{x}\n", .{ ev.window, ev.event });
+    log.debug("UnmapNotify: client close win=0x{x} event=0x{x}", .{ ev.window, ev.event });
 
     // Client-initiated unmap — reparent client back to root, destroy frame
     _ = xcb.c.xcb_reparent_window(ctx.conn, wd.id, ctx.root_window, @intCast(con.rect.x), @intCast(con.rect.y));
@@ -911,7 +1004,7 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
 
 fn handleDestroyNotify(ctx: *EventContext, ev: *xcb.DestroyNotifyEvent) void {
     if (ev.event == ev.window) return;
-    std.debug.print("DestroyNotify: win=0x{x} event=0x{x}\n", .{ ev.window, ev.event });
+    log.debug("DestroyNotify: win=0x{x} event=0x{x}", .{ ev.window, ev.event });
 
     const con = findContainerByWindow(ctx, ev.window) orelse return;
 
@@ -965,8 +1058,8 @@ fn handleKeyPress(ctx: *EventContext, ev: *xcb.KeyPressEvent) void {
             std.mem.eql(u8, kb.mode, ctx.current_mode) and
             std.ascii.eqlIgnoreCase(kb.key, name))
         {
-            // Broadcast binding event before executing the command
-            {
+            // Broadcast binding event only if there are subscribers (skip JSON formatting otherwise)
+            if (hasIpcSubscribers(ctx, IPC_EVENT_BINDING)) {
                 var bind_buf: [512]u8 = undefined;
                 var bind_fbs = std.io.fixedBufferStream(&bind_buf);
                 const bind_w = bind_fbs.writer();
@@ -1361,14 +1454,19 @@ fn handlePropertyNotify(ctx: *EventContext, ev: *xcb.PropertyNotifyEvent) void {
 
     // Update title
     if (ev.atom == ctx.atoms.net_wm_name or ev.atom == xcb.ATOM_WM_NAME) {
-        const title = readTitle(ctx.allocator, ctx.conn, ev.window, ctx.atoms);
+        const new_title = readTitle(ctx.allocator, ctx.conn, ev.window, ctx.atoms);
         if (con.window) |*wd| {
+            // Skip redraw if title unchanged (helps with frequent updaters like media players)
+            if (std.mem.eql(u8, wd.title, new_title)) {
+                if (new_title.len > 0) ctx.allocator.free(new_title);
+                return;
+            }
             // Free old title
             if (wd.title.len > 0) ctx.allocator.free(wd.title);
-            wd.title = title;
+            wd.title = new_title;
         } else {
             // No window data to store into; free the new allocation
-            if (title.len > 0) ctx.allocator.free(title);
+            if (new_title.len > 0) ctx.allocator.free(new_title);
         }
         // Redraw title bars if window is inside a tabbed/stacked container
         if (con.parent) |parent| {
@@ -1844,7 +1942,7 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
                             if (prev_ws.children.first) |child| {
                                 setFocus(ctx, getDeepestChild(child));
                             }
-                            updateCurrentDesktop(ctx);
+                            updateDesktopEwmhCombined(ctx);
                             relayoutAndRender(ctx);
                             {
                                 var baf_ev_buf: [256]u8 = undefined;
@@ -1894,9 +1992,7 @@ fn executeWorkspace(ctx: *EventContext, cmd: command_mod.Command) void {
             setFocus(ctx, getDeepestChild(child));
         }
 
-        updateCurrentDesktop(ctx);
-        updateDesktopNames(ctx);
-        updateNumberOfDesktops(ctx);
+        updateDesktopEwmhCombined(ctx);
         relayoutAndRender(ctx);
 
         // Broadcast workspace event (with JSON-escaped name)
@@ -2432,7 +2528,7 @@ pub fn unreparentAll(ctx: *EventContext) void {
 pub fn executeRestart(ctx: *EventContext) void {
     // Re-exec ourselves. This preserves the X connection and managed windows
     // because the new process inherits file descriptors.
-    std.debug.print("zephwm: restarting via execvp\n", .{});
+    log.info("restarting via execvp", .{});
 
     // Set restart flag so exec commands are skipped on re-exec
     _ = setenv("ZEPHWM_RESTART", "1", 1);
@@ -2442,7 +2538,7 @@ pub fn executeRestart(ctx: *EventContext) void {
     // so the WM continues running in a valid state.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe_path = std.fs.readLinkAbsolute("/proc/self/exe", &exe_buf) catch {
-        std.debug.print("zephwm: restart failed: cannot read /proc/self/exe\n", .{});
+        log.err("restart failed: cannot read /proc/self/exe", .{});
         return;
     };
     // Null-terminate for execvp
@@ -2460,7 +2556,7 @@ pub fn executeRestart(ctx: *EventContext) void {
     // If execvp returns, it failed — the WM state is now broken (windows
     // already unreparented), so exit immediately rather than returning to
     // a corrupted event loop.
-    std.debug.print("zephwm: restart execvp failed\n", .{});
+    log.err("restart execvp failed", .{});
     std.c._exit(1);
 }
 

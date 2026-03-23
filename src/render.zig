@@ -60,7 +60,8 @@ fn drawTitleText(conn: *xcb.Connection, drawable: u32, x: i16, y: i16, title: []
 
 /// Draw title bars for tabbed or stacked layout containers.
 /// Draws on the visible (focused) child's frame window.
-fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
+/// `precomputed_count`: if > 0, use as the tiling child count (avoids redundant O(N) walk).
+fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container, precomputed_count: usize) void {
     // Find the visible (focused) child — title bars are drawn on its frame
     const visible_child = blk: {
         var cur2 = con.children.first;
@@ -79,13 +80,14 @@ fn drawTitleBars(conn: *xcb.Connection, con: *tree.Container) void {
     const frame_win = if (target_child.window) |wd_tc| wd_tc.frame_id else return;
     if (frame_win == 0) return;
 
-    var visible_count: usize = 0;
-    {
+    const visible_count: usize = if (precomputed_count > 0) precomputed_count else blk: {
+        var count: usize = 0;
         var c = con.children.first;
         while (c) |ch| : (c = ch.next) {
-            if (!ch.is_floating and ch.is_fullscreen == .none) visible_count += 1;
+            if (!ch.is_floating and ch.is_fullscreen == .none) count += 1;
         }
-    }
+        break :blk count;
+    };
     if (visible_count <= 1) return;
 
     const text_y_offset: i16 = @intCast(font_ascent + 2);
@@ -170,7 +172,7 @@ pub fn redrawTitleBarsForContainer(conn: *xcb.Connection, con: *tree.Container) 
     if (!title_gc_initialized or title_gc == 0) return;
     if (con.layout != .tabbed and con.layout != .stacked) return;
     if (con.children.len() <= 1) return;
-    drawTitleBars(conn, con);
+    drawTitleBars(conn, con, 0); // 0 = compute count internally
 }
 
 
@@ -265,7 +267,8 @@ pub fn applyTree(
             }
         }
     }
-    _ = xcb.flush(conn);
+    // Note: flush is NOT done here — the caller (relayoutAndRender) does a single
+    // flush after both rendering and ConfigureNotify sends, reducing syscalls.
 }
 
 /// Find the focused workspace under an output. Falls back to first workspace.
@@ -287,7 +290,7 @@ fn applyRecursive(
     border_unfocus_color: u32,
 ) void {
     switch (con.type) {
-        .window => applyWindow(conn, con, border_focus_color, border_unfocus_color),
+        .window => applyWindow(conn, con, border_focus_color, border_unfocus_color, 0),
         .root, .output, .workspace, .split_con => {
             // For tabbed/stacked: only the focused child should be mapped
             const hide_unfocused = (con.layout == .tabbed or con.layout == .stacked) and
@@ -301,15 +304,23 @@ fn applyRecursive(
             var normal_border_buf: [32]*tree.Container = undefined;
             var normal_border_count: usize = 0;
 
-            // Pre-compute for tabbed/stacked O(n) visibility (avoid O(n²))
-            const has_focused_tiling = if (hide_unfocused) anyTilingChildFocused(con) else false;
-            const first_tiling: ?*tree.Container = if (hide_unfocused and !has_focused_tiling) blk: {
-                var fc = con.children.first;
-                while (fc) |c| : (fc = c.next) {
-                    if (!c.is_floating and c.is_fullscreen == .none) break :blk c;
+            // For tabbed/stacked: pre-count tiling children, find focused tiling
+            // child and first tiling child in a single O(N) walk BEFORE the main
+            // loop. This ensures the full count is available when applyWindow is
+            // called (stacked layout needs total count for title_offset).
+            var tiling_count: u16 = 0;
+            var has_focused_tiling: bool = false;
+            var first_tiling: ?*tree.Container = null;
+            if (hide_unfocused) {
+                var pre = con.children.first;
+                while (pre) |ch| : (pre = ch.next) {
+                    if (!ch.is_floating and ch.is_fullscreen == .none) {
+                        tiling_count += 1;
+                        if (first_tiling == null) first_tiling = ch;
+                        if (ch.is_focused) has_focused_tiling = true;
+                    }
                 }
-                break :blk null;
-            } else null;
+            }
 
             var cur = con.children.first;
             while (cur) |child| : (cur = child.next) {
@@ -333,7 +344,12 @@ fn applyRecursive(
                     const show = child.is_focused or (!has_focused_tiling and child == first_tiling.?);
                     if (show) {
                         mapSubtree(conn, child);
-                        applyRecursive(conn, child, border_focus_color, border_unfocus_color);
+                        // Pass final tiling_count so applyWindow has correct title_offset
+                        if (child.type == .window) {
+                            applyWindow(conn, child, border_focus_color, border_unfocus_color, tiling_count);
+                        } else {
+                            applyRecursive(conn, child, border_focus_color, border_unfocus_color);
+                        }
                     } else {
                         unmapSubtree(conn, child);
                     }
@@ -350,10 +366,9 @@ fn applyRecursive(
             }
 
             // Draw tab bar / stacked headers AFTER frames are configured.
-            // XCB processes requests in FIFO order, so no flush needed between
-            // configure and draw — the single flush at the end of applyTree suffices.
+            // Pass precomputed tiling_count to avoid redundant O(N) recount.
             if (hide_unfocused and title_gc != 0) {
-                drawTitleBars(conn, con);
+                drawTitleBars(conn, con, tiling_count);
             }
 
             // Draw border normal title bars
@@ -385,11 +400,14 @@ fn applyRecursive(
     }
 }
 
+/// `parent_tiling_count`: if > 0, use as the parent's tiling child count
+/// (avoids redundant O(N) sibling walk for tabbed/stacked title offset).
 fn applyWindow(
     conn: *xcb.Connection,
     con: *tree.Container,
     border_focus_color: u32,
     border_unfocus_color: u32,
+    parent_tiling_count: u16,
 ) void {
     if (con.window == null) return;
     const wd = &con.window.?;
@@ -405,12 +423,15 @@ fn applyWindow(
     if (con.parent) |parent| {
         if (!con.is_floating and con.is_fullscreen == .none) {
             if ((parent.layout == .tabbed or parent.layout == .stacked) and parent.children.len() > 1) {
-                // Count only visible tiling children (not floating, not fullscreen)
-                var visible_count: u16 = 0;
-                var c = parent.children.first;
-                while (c) |ch| : (c = ch.next) {
-                    if (!ch.is_floating and ch.is_fullscreen == .none) visible_count += 1;
-                }
+                // Use precomputed count if available, otherwise count siblings
+                const visible_count: u16 = if (parent_tiling_count > 0) parent_tiling_count else blk: {
+                    var count: u16 = 0;
+                    var c = parent.children.first;
+                    while (c) |ch| : (c = ch.next) {
+                        if (!ch.is_floating and ch.is_fullscreen == .none) count += 1;
+                    }
+                    break :blk count;
+                };
                 if (visible_count > 1) {
                     title_offset = if (parent.layout == .tabbed) tab_bar_height else tab_bar_height * visible_count;
                 }
@@ -580,15 +601,6 @@ fn anyTilingChildFocused(con: *tree.Container) bool {
     var cur = con.children.first;
     while (cur) |child| : (cur = child.next) {
         if (!child.is_floating and child.is_focused) return true;
-    }
-    return false;
-}
-
-/// Check if `child` is the first tiling (non-floating) child of `con`.
-fn isFirstTilingChild(con: *tree.Container, child: *tree.Container) bool {
-    var cur = con.children.first;
-    while (cur) |c| : (cur = c.next) {
-        if (!c.is_floating) return c == child;
     }
     return false;
 }
