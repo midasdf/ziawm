@@ -230,20 +230,20 @@ const SIOCGIWESSID: u32 = 0x8B1B;
 const IW_ESSID_MAX_SIZE: usize = 32;
 const IFNAMSIZ: usize = 16;
 
-// iwreq layout (x86_64): 32 bytes total
-// [0..16]:  ifr_ifrn.ifrn_name[IFNAMSIZ]
-// [16..24]: iw_point.pointer (void*, 8 bytes on x86_64)
-// [24..26]: iw_point.length (u16)
-// [26..28]: iw_point.flags (u16)
-// [28..32]: padding to align union iwreq_data (16 bytes total)
+// iwreq layout: 32 bytes total (16-byte name + 16-byte union)
+// Union ifr_ifru is always 16 bytes on Linux regardless of architecture.
 const IwreqRaw = extern struct {
     ifrn_name: [IFNAMSIZ]u8,
-    // union iwreq_data - we only use the essid (iw_point) member
-    pointer: ?[*]u8, // iw_point.pointer
-    length: u16, // iw_point.length
-    flags: u16, // iw_point.flags
-    _pad: [4]u8, // remaining bytes of the union
+    // iw_point members from union iwreq_data
+    pointer: ?[*]u8,
+    length: u16,
+    flags: u16,
+    // Pad to fixed 16-byte union size (arch-independent)
+    _pad: [16 - @sizeOf(?[*]u8) - @sizeOf(u16) - @sizeOf(u16)]u8,
 };
+comptime {
+    if (@sizeOf(IwreqRaw) != 32) @compileError("IwreqRaw size mismatch");
+}
 
 /// Get SSID from a wireless interface via ioctl SIOCGIWESSID.
 pub fn getSsid(iface_name: []const u8) ?SsidBuf {
