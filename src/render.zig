@@ -30,6 +30,19 @@ pub fn setTitleBarColors(focused_bg: u32, focused_text: u32, unfocused_bg: u32, 
     color_unfocused_text = unfocused_text;
 }
 
+/// Update only the border color of a window's frame. No geometry changes.
+/// Used by focus-only render path to avoid full relayout.
+pub fn updateBorderColor(conn: *xcb.Connection, con: *tree.Container, border_focus_color: u32, border_unfocus_color: u32) void {
+    const wd = con.window orelse return;
+    const color = if (con.is_focused) border_focus_color else border_unfocus_color;
+    const border_values = [_]u32{color};
+    if (wd.frame_id != 0) {
+        _ = xcb.changeWindowAttributes(conn, wd.frame_id, xcb.CW_BORDER_PIXEL, &border_values);
+    } else {
+        _ = xcb.changeWindowAttributes(conn, wd.id, xcb.CW_BORDER_PIXEL, &border_values);
+    }
+}
+
 /// Draw title text with ellipsis truncation on a drawable window.
 fn drawTitleText(conn: *xcb.Connection, drawable: u32, x: i16, y: i16, title: []const u8, max_width: u16, is_focused: bool) void {
     const max_chars: usize = if (font_char_width > 0 and max_width > 8)
@@ -449,6 +462,8 @@ fn applyWindow(
     // Configure frame: position and size (includes title bar area)
     const frame_h: u32 = r.h + @as(u32, title_offset);
     const frame_y: i32 = r.y - @as(i32, @intCast(title_offset));
+    const color = if (con.is_focused) border_focus_color else border_unfocus_color;
+
     if (frame_id != 0) {
         // Compute effective border width from per-window style
         const effective_border: u16 = blk: {
@@ -464,59 +479,86 @@ fn applyWindow(
             if (con.border_width_override >= 0) break :blk @intCast(con.border_width_override);
             break :blk config_border_px;
         };
-        // Frame content width/height = allocated rect minus borders on both sides.
-        // X11 draws borders OUTSIDE the configured size, so we shrink the content
-        // so that content + 2*border fits within the layout-allocated rect.
         const b2: u32 = @as(u32, effective_border) * 2;
         const content_w: u32 = if (r.w > b2) r.w - b2 else 1;
         const content_h: u32 = if (frame_h > b2) frame_h - b2 else 1;
-        const values = [_]u32{
-            @bitCast(r.x),
-            @bitCast(frame_y),
-            content_w,
-            content_h,
-            @as(u32, effective_border),
-        };
-        const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
-            xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT |
-            xcb.CONFIG_WINDOW_BORDER_WIDTH;
-        _ = xcb.configureWindow(conn, frame_id, mask, &values);
 
-        // Configure client inside frame (fills frame content area)
-        const client_w: u32 = content_w;
-        const client_h: u32 = if (content_h > @as(u32, title_offset)) content_h - @as(u32, title_offset) else 1;
-        const client_values = [_]u32{
-            0, // x = 0 inside frame
-            @as(u32, title_offset), // y = below title bar
-            client_w,
-            client_h,
-        };
-        const client_mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
-            xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
-        _ = xcb.configureWindow(conn, wd.id, client_mask, &client_values);
+        // Skip configureWindow if geometry unchanged (major optimization)
+        const geom_changed = (r.x != wd.last_x or frame_y != wd.last_y or
+            content_w != wd.last_w or content_h != wd.last_h or
+            effective_border != wd.last_bw);
+        wd.geometry_changed = geom_changed;
 
-        // Border color on frame
-        const color = if (con.is_focused) border_focus_color else border_unfocus_color;
-        const border_values = [_]u32{color};
-        _ = xcb.changeWindowAttributes(conn, frame_id, xcb.CW_BORDER_PIXEL, &border_values);
+        if (geom_changed) {
+            const values = [_]u32{
+                @bitCast(r.x),
+                @bitCast(frame_y),
+                content_w,
+                content_h,
+                @as(u32, effective_border),
+            };
+            const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+                xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT |
+                xcb.CONFIG_WINDOW_BORDER_WIDTH;
+            _ = xcb.configureWindow(conn, frame_id, mask, &values);
 
-        // Map frame
+            // Configure client inside frame
+            const client_w: u32 = content_w;
+            const client_h: u32 = if (content_h > @as(u32, title_offset)) content_h - @as(u32, title_offset) else 1;
+            const client_values = [_]u32{
+                0,
+                @as(u32, title_offset),
+                client_w,
+                client_h,
+            };
+            const client_mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+                xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
+            _ = xcb.configureWindow(conn, wd.id, client_mask, &client_values);
+
+            wd.last_x = r.x;
+            wd.last_y = frame_y;
+            wd.last_w = content_w;
+            wd.last_h = content_h;
+            wd.last_bw = effective_border;
+        }
+
+        // Border color: only update if changed
+        if (color != wd.last_color) {
+            const border_values = [_]u32{color};
+            _ = xcb.changeWindowAttributes(conn, frame_id, xcb.CW_BORDER_PIXEL, &border_values);
+            wd.last_color = color;
+        }
+
+        // Map frame (no-op if already mapped in X11)
         _ = xcb.mapWindow(conn, frame_id);
     } else {
         // No frame — configure client directly (fallback)
-        const values = [_]u32{
-            @bitCast(r.x),
-            @bitCast(r.y),
-            r.w,
-            r.h,
-        };
-        const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
-            xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
-        _ = xcb.configureWindow(conn, wd.id, mask, &values);
+        const geom_changed = (r.x != wd.last_x or r.y != wd.last_y or
+            r.w != wd.last_w or r.h != wd.last_h);
+        wd.geometry_changed = geom_changed;
 
-        const color = if (con.is_focused) border_focus_color else border_unfocus_color;
-        const border_values = [_]u32{color};
-        _ = xcb.changeWindowAttributes(conn, wd.id, xcb.CW_BORDER_PIXEL, &border_values);
+        if (geom_changed) {
+            const values = [_]u32{
+                @bitCast(r.x),
+                @bitCast(r.y),
+                r.w,
+                r.h,
+            };
+            const mask: u16 = xcb.CONFIG_WINDOW_X | xcb.CONFIG_WINDOW_Y |
+                xcb.CONFIG_WINDOW_WIDTH | xcb.CONFIG_WINDOW_HEIGHT;
+            _ = xcb.configureWindow(conn, wd.id, mask, &values);
+
+            wd.last_x = r.x;
+            wd.last_y = r.y;
+            wd.last_w = r.w;
+            wd.last_h = r.h;
+        }
+
+        if (color != wd.last_color) {
+            const border_values = [_]u32{color};
+            _ = xcb.changeWindowAttributes(conn, wd.id, xcb.CW_BORDER_PIXEL, &border_values);
+            wd.last_color = color;
+        }
 
         _ = xcb.mapWindow(conn, wd.id);
     }

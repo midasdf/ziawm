@@ -151,8 +151,9 @@ fn handleRandrScreenChange(ctx: *EventContext) void {
         return;
     };
     broadcastIpcEvent(ctx, .output, "{\"change\":\"unspecified\"}");
-    relayoutAndRender(ctx);
+    // EWMH before relayout so both get flushed in one batch
     updateAllEwmh(ctx);
+    relayoutAndRender(ctx);
 }
 
 // --- Tree helpers ---
@@ -310,6 +311,51 @@ fn clearFocusedPath(root: *tree.Container) void {
     }
 }
 
+/// Lightweight focus-only render: update border colors + title bars without relayout.
+/// Call after setFocus() when only focus changed (no structure/geometry changes).
+/// Falls back to relayoutAndRender if tabbed/stacked containers need map/unmap.
+fn renderFocusUpdate(ctx: *EventContext, old_focused: ?*tree.Container) void {
+    const new_focused = getFocusedContainer(ctx.tree_root);
+
+    // No change — skip
+    if (old_focused != null and new_focused != null and old_focused.? == new_focused.?) return;
+
+    // Tabbed/stacked containers need map/unmap of children → fall back to full relayout
+    const need_full = blk: {
+        if (old_focused) |old| {
+            if (old.parent) |p| {
+                if ((p.layout == .tabbed or p.layout == .stacked) and p.children.len() > 1) break :blk true;
+            }
+        }
+        if (new_focused) |nf| {
+            if (nf.parent) |p| {
+                if ((p.layout == .tabbed or p.layout == .stacked) and p.children.len() > 1) break :blk true;
+            }
+        }
+        break :blk false;
+    };
+
+    if (need_full) {
+        relayoutAndRender(ctx);
+        return;
+    }
+
+    // Simple case: update border colors + border-normal title bars only
+    if (old_focused) |old| {
+        render.updateBorderColor(ctx.conn, old, ctx.border_focus_color, ctx.border_unfocus_color);
+        if (old.border_style == .normal and old.type == .window) {
+            render.drawNormalTitleBar(ctx.conn, old);
+        }
+    }
+    if (new_focused) |nf| {
+        render.updateBorderColor(ctx.conn, nf, ctx.border_focus_color, ctx.border_unfocus_color);
+        if (nf.border_style == .normal and nf.type == .window) {
+            render.drawNormalTitleBar(ctx.conn, nf);
+        }
+    }
+    _ = xcb.flush(ctx.conn);
+}
+
 /// Apply layout and render for a workspace.
 pub fn relayoutAndRender(ctx: *EventContext) void {
     // Apply layout to all workspaces
@@ -370,8 +416,14 @@ pub fn relayoutAndRender(ctx: *EventContext) void {
                     r.h = if (r.h > og2) r.h - og2 else 0;
                 }
 
-                ws.rect = r;
-                layout.apply(ws, gap, border);
+                // Skip layout if workspace is clean and rect unchanged
+                const rect_changed = (ws.rect.x != r.x or ws.rect.y != r.y or
+                    ws.rect.w != r.w or ws.rect.h != r.h);
+                if (ws.dirty or rect_changed) {
+                    ws.rect = r;
+                    layout.apply(ws, gap, border);
+                    ws.dirty = false;
+                }
             }
     }
 
@@ -947,8 +999,8 @@ fn handleMapRequest(ctx: *EventContext, ev: *xcb.MapRequestEvent) void {
     // Set focus to new window
     setFocus(ctx, con);
 
-    // Update EWMH properties
-    updateAllEwmh(ctx);
+    // Only client list changed (new window), desktop state unchanged
+    updateClientList(ctx);
 
     // Layout and render
     relayoutAndRender(ctx);
@@ -997,7 +1049,7 @@ fn handleUnmapNotify(ctx: *EventContext, ev: *xcb.UnmapNotifyEvent) void {
     con.unlink();
     con.destroy(ctx.allocator);
 
-    updateAllEwmh(ctx);
+    updateClientList(ctx);
     relayoutAndRender(ctx);
     broadcastIpcEvent(ctx, .window, "{\"change\":\"close\"}");
 }
@@ -1029,7 +1081,7 @@ fn handleDestroyNotify(ctx: *EventContext, ev: *xcb.DestroyNotifyEvent) void {
     con.unlink();
     con.destroy(ctx.allocator);
 
-    updateAllEwmh(ctx);
+    updateClientList(ctx);
     relayoutAndRender(ctx);
 }
 
@@ -1113,14 +1165,17 @@ fn keysymToName(keysym: xcb.Keysym, buf: *[64]u8) ?[]const u8 {
 fn handleEnterNotify(ctx: *EventContext, ev: *xcb.EnterNotifyEvent) void {
     if (!ctx.focus_follows_mouse) return;
 
-    const con = findContainerByWindow(ctx,ev.event) orelse return;
+    const con = findContainerByWindow(ctx, ev.event) orelse return;
+    const old_focused = getFocusedContainer(ctx.tree_root);
     setFocus(ctx, con);
-
+    renderFocusUpdate(ctx, old_focused);
 }
 
 fn handleButtonPress(ctx: *EventContext, ev: *xcb.ButtonPressEvent) void {
     const con = findContainerByWindow(ctx, ev.event) orelse return;
+    const old_focused = getFocusedContainer(ctx.tree_root);
     setFocus(ctx, con);
+    renderFocusUpdate(ctx, old_focused);
 
     // Check for floating_modifier (Mod4) + button for drag move/resize
     if ((ev.state & xcb.MOD_MASK_4) != 0) {
@@ -1435,14 +1490,14 @@ fn sendConfigureNotify(ctx: *EventContext, con: *tree.Container) void {
     _ = xcb.sendEvent(ctx.conn, 0, wd.id, xcb.EVENT_MASK_STRUCTURE_NOTIFY, @ptrCast(&event_data));
 }
 
-/// Send ConfigureNotify to all managed windows after relayout.
+/// Send ConfigureNotify only to windows whose geometry changed during this render pass.
 fn sendConfigureNotifyAll(ctx: *EventContext) void {
     var it = ctx.window_map.iterator();
     while (it.next()) |entry| {
         const con = entry.value_ptr.*;
         if (con.window) |wd| {
-            // Only process client window entries (skip frame_id entries)
-            if (entry.key_ptr.* == wd.id) {
+            // Only process client window entries that had geometry changes
+            if (entry.key_ptr.* == wd.id and wd.geometry_changed) {
                 sendConfigureNotify(ctx, con);
             }
         }
@@ -1484,7 +1539,7 @@ fn handlePropertyNotify(ctx: *EventContext, ev: *xcb.PropertyNotifyEvent) void {
                 render.drawNormalTitleBar(ctx.conn, con);
             }
         }
-        _ = xcb.flush(ctx.conn);
+        // No flush here — the event loop batches flush after all events
     }
 
     // Update urgency from WM_HINTS
@@ -1522,11 +1577,12 @@ fn handlePropertyNotify(ctx: *EventContext, ev: *xcb.PropertyNotifyEvent) void {
 }
 
 fn handleClientMessage(ctx: *EventContext, ev: *xcb.ClientMessageEvent) void {
-    // _NET_ACTIVE_WINDOW: focus request
+    // _NET_ACTIVE_WINDOW: focus request (focus-only, no relayout needed)
     if (ev.type == ctx.atoms.net_active_window) {
-        const con = findContainerByWindow(ctx,ev.window) orelse return;
+        const con = findContainerByWindow(ctx, ev.window) orelse return;
+        const old_focused = getFocusedContainer(ctx.tree_root);
         setFocus(ctx, con);
-        relayoutAndRender(ctx);
+        renderFocusUpdate(ctx, old_focused);
         return;
     }
 
@@ -1551,6 +1607,7 @@ fn handleClientMessage(ctx: *EventContext, ev: *xcb.ClientMessageEvent) void {
                 2 => con.is_fullscreen = if (is_fs) .none else .window, // _NET_WM_STATE_TOGGLE
                 else => {},
             }
+            con.markDirtyToWorkspace();
             relayoutAndRender(ctx);
         }
     }
@@ -1606,7 +1663,7 @@ fn handleExpose(ctx: *EventContext, ev: *xcb.c.xcb_expose_event_t) void {
             render.drawNormalTitleBar(ctx.conn, con);
         }
     }
-    _ = xcb.flush(ctx.conn);
+    // No flush here — the event loop batches flush after all events
 }
 
 // --- Command execution ---
@@ -1674,46 +1731,43 @@ fn executeSplit(ctx: *EventContext, cmd: command_mod.Command) void {
     } else {
         // If focused is already a container (split_con/workspace), just change its layout
         focused.layout = new_layout;
+        focused.markDirtyToWorkspace();
     }
     relayoutAndRender(ctx);
 }
 
 fn executeFocus(ctx: *EventContext, cmd: command_mod.Command) void {
     const arg = cmd.args[0] orelse return;
+    const old_focused = getFocusedContainer(ctx.tree_root);
 
     if (std.mem.eql(u8, arg, "parent")) {
-        const focused = getFocusedContainer(ctx.tree_root) orelse return;
+        const focused = old_focused orelse return;
         if (focused.parent) |parent| {
             if (parent.type != .root) {
                 setFocus(ctx, parent);
             }
         }
-        return;
-    }
-
-    if (std.mem.eql(u8, arg, "child")) {
-        const focused = getFocusedContainer(ctx.tree_root) orelse return;
+    } else if (std.mem.eql(u8, arg, "child")) {
+        const focused = old_focused orelse return;
         if (focused.children.first) |child| {
             setFocus(ctx, child);
         }
-        return;
+    } else {
+        // Directional focus: left/right/up/down
+        const focused = old_focused orelse return;
+
+        if (std.mem.eql(u8, arg, "left") or std.mem.eql(u8, arg, "prev")) {
+            focusInDirection(ctx, focused, .hsplit, .prev);
+        } else if (std.mem.eql(u8, arg, "right") or std.mem.eql(u8, arg, "next")) {
+            focusInDirection(ctx, focused, .hsplit, .next);
+        } else if (std.mem.eql(u8, arg, "up")) {
+            focusInDirection(ctx, focused, .vsplit, .prev);
+        } else if (std.mem.eql(u8, arg, "down")) {
+            focusInDirection(ctx, focused, .vsplit, .next);
+        }
     }
 
-    // Directional focus: left/right/up/down
-    // The direction must match the parent's split orientation to navigate siblings.
-    // If it doesn't match, walk up the tree to find a container with matching orientation.
-    const focused = getFocusedContainer(ctx.tree_root) orelse return;
-
-    if (std.mem.eql(u8, arg, "left") or std.mem.eql(u8, arg, "prev")) {
-        focusInDirection(ctx, focused, .hsplit, .prev);
-    } else if (std.mem.eql(u8, arg, "right") or std.mem.eql(u8, arg, "next")) {
-        focusInDirection(ctx, focused, .hsplit, .next);
-    } else if (std.mem.eql(u8, arg, "up")) {
-        focusInDirection(ctx, focused, .vsplit, .prev);
-    } else if (std.mem.eql(u8, arg, "down")) {
-        focusInDirection(ctx, focused, .vsplit, .next);
-    }
-
+    renderFocusUpdate(ctx, old_focused);
 }
 
 fn getDeepestChild(con: *tree.Container) *tree.Container {
@@ -1880,6 +1934,7 @@ fn executeLayout(ctx: *EventContext, cmd: command_mod.Command) void {
             .stacked => .hsplit,
         };
     }
+    target.markDirtyToWorkspace();
     relayoutAndRender(ctx);
 }
 
@@ -2149,6 +2204,7 @@ fn executeExec(cmd: command_mod.Command) void {
 fn executeFloating(ctx: *EventContext) void {
     const focused = getFocusedContainer(ctx.tree_root) orelse return;
     focused.is_floating = !focused.is_floating;
+    focused.markDirtyToWorkspace();
     relayoutAndRender(ctx);
 }
 
@@ -2221,12 +2277,14 @@ fn executeBorder(ctx: *EventContext, cmd: command_mod.Command) void {
         };
     }
 
+    focused.markDirtyToWorkspace();
     relayoutAndRender(ctx);
 }
 
 fn executeFullscreen(ctx: *EventContext) void {
     const focused = getFocusedContainer(ctx.tree_root) orelse return;
     focused.is_fullscreen = if (focused.is_fullscreen != .none) .none else .window;
+    focused.markDirtyToWorkspace();
 
     // Update _NET_WM_STATE
     if (focused.window) |wd| {
@@ -2360,6 +2418,7 @@ fn executeResize(ctx: *EventContext, cmd: command_mod.Command) void {
     if (sibling.percent < 0.05) sibling.percent = 0.05;
     if (sibling.percent > 0.95) sibling.percent = 0.95;
 
+    resize_child.markDirtyToWorkspace();
     relayoutAndRender(ctx);
 }
 
@@ -2401,6 +2460,7 @@ fn executeResizeInternal(ctx: *EventContext, con: *tree.Container, direction: []
         sibling.percent = 1.0 / @as(f32, @floatFromInt(n));
     }
     sibling.percent = @max(0.05, @min(0.95, sibling.percent - sign));
+    resize_child.markDirtyToWorkspace();
     relayoutAndRender(ctx);
 }
 
@@ -2440,12 +2500,13 @@ fn executeFocusOutput(ctx: *EventContext, cmd: command_mod.Command) void {
     }
 
     if (target_ws) |ws| {
+        const old_focused = getFocusedContainer(ctx.tree_root);
         setFocus(ctx, ws);
         // Try to focus a window in this workspace
         if (findFocusedLeaf(ws)) |leaf| {
             if (leaf != ws) setFocus(ctx, leaf);
         }
-        relayoutAndRender(ctx);
+        renderFocusUpdate(ctx, old_focused);
     }
 }
 

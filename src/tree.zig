@@ -31,6 +31,16 @@ pub const WindowData = struct {
     /// Whether the WM considers this window to be in a mapped state.
     /// Used to avoid redundant unmap calls and counter drift.
     mapped: bool = true,
+    /// Last-applied frame geometry for change detection (skip redundant configureWindow).
+    /// Sentinel: last_w=0 means never applied.
+    last_x: i32 = 0,
+    last_y: i32 = 0,
+    last_w: u32 = 0,
+    last_h: u32 = 0,
+    last_bw: u16 = 0,
+    last_color: u32 = 0xFFFFFFFF,
+    /// Set by applyWindow when geometry changed. Used by sendConfigureNotifyChanged.
+    geometry_changed: bool = true,
 };
 
 pub const WorkspaceData = struct {
@@ -189,6 +199,7 @@ pub const Container = struct {
     pub fn unlink(self: *Container) void {
         if (self.parent) |par| {
             par.children.remove(self);
+            par.markDirtyToWorkspace();
             self.parent = null;
         }
     }
@@ -197,6 +208,7 @@ pub const Container = struct {
     pub fn appendChild(self: *Container, child: *Container) void {
         child.parent = self;
         self.children.append(child);
+        self.markDirtyToWorkspace();
     }
 
     /// Insert `child` before `ref` in this container's child list.
@@ -204,6 +216,7 @@ pub const Container = struct {
     pub fn insertBefore(self: *Container, child: *Container, ref: *Container) void {
         child.parent = self;
         self.children.insertBefore(child, ref);
+        self.markDirtyToWorkspace();
     }
 
     /// Move `child` to the head of this container's child list.
@@ -266,6 +279,17 @@ pub const Container = struct {
                     return;
                 }
             }
+        }
+    }
+
+    /// Mark the containing workspace as needing relayout.
+    /// Walks up from this container to the nearest workspace ancestor and sets dirty=true.
+    pub fn markDirtyToWorkspace(self: *Container) void {
+        var c: ?*Container = self;
+        while (c) |cur| {
+            cur.dirty = true;
+            if (cur.type == .workspace) return;
+            c = cur.parent;
         }
     }
 

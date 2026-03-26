@@ -845,10 +845,35 @@ pub fn main() !void {
 
         for (events[0..@intCast(nfds_signed)]) |ev| {
             if (ev.data.fd == xcb_fd) {
-                // Drain all pending X events
+                // Drain all pending X events with motion coalescing
                 while (xcb.pollForEvent(conn)) |xevent| {
-                    event.handleEvent(&ctx, xevent);
-                    std.c.free(xevent);
+                    const response_type = xevent.response_type & 0x7F;
+                    if (response_type == xcb.c.XCB_MOTION_NOTIFY) {
+                        // Coalesce consecutive motion events: skip intermediate, process latest
+                        var motion_ev = xevent;
+                        var consumed = false;
+                        while (xcb.pollForEvent(conn)) |next| {
+                            const next_type = next.response_type & 0x7F;
+                            if (next_type == xcb.c.XCB_MOTION_NOTIFY) {
+                                std.c.free(motion_ev);
+                                motion_ev = next;
+                            } else {
+                                event.handleEvent(&ctx, motion_ev);
+                                std.c.free(motion_ev);
+                                event.handleEvent(&ctx, next);
+                                std.c.free(next);
+                                consumed = true;
+                                break;
+                            }
+                        }
+                        if (!consumed) {
+                            event.handleEvent(&ctx, motion_ev);
+                            std.c.free(motion_ev);
+                        }
+                    } else {
+                        event.handleEvent(&ctx, xevent);
+                        std.c.free(xevent);
+                    }
                 }
                 // Batch flush after processing all X events
                 _ = xcb.flush(conn);
