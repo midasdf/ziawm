@@ -93,6 +93,8 @@ const default_config =
     \\# Bar (built-in status modules, no external status_command needed)
     \\bar {
     \\    position top
+    \\    font monospace:size=11
+    \\    height 22
     \\}
     \\
 ;
