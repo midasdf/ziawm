@@ -15,9 +15,6 @@ const c = @cImport({
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
 const VERSION = "0.1.0";
-const BAR_HEIGHT: u16 = 16;
-const WS_BUTTON_PAD: u16 = 10; // horizontal padding per workspace button
-const STATUS_PAD: u16 = 8;
 
 // Colors
 const BG_COLOR: u32 = 0x1a1a2e;
@@ -27,8 +24,6 @@ const FOCUSED_FG_STR = "#ffffff";
 const URGENT_BG: u32 = 0x900000;
 const UNFOCUSED_FG_STR = "#606060";
 const SEPARATOR_COLOR_STR = "#505060";
-const SEPARATOR_PAD: u16 = 4;
-const FONT_NAME = "monospace:size=8";
 
 const MAX_OUTPUTS = 8;
 const MaxWorkspaces = 16;
@@ -62,6 +57,73 @@ const StatusBlock = struct {
 };
 
 const MAX_STATUS_BLOCKS = 32;
+
+const BarConfig = struct {
+    font: [256]u8 = undefined,
+    font_len: u8 = 0,
+    bar_height: u16 = 22,
+    status_command: [512]u8 = undefined,
+    status_command_len: u16 = 0,
+
+    fn getFontZ(self: *const BarConfig, buf: *[257]u8) [*:0]const u8 {
+        const len = self.font_len;
+        if (len == 0) {
+            const default = "monospace:size=11";
+            @memcpy(buf[0..default.len], default);
+            buf[default.len] = 0;
+            return @ptrCast(buf[0..default.len :0]);
+        }
+        @memcpy(buf[0..len], self.font[0..len]);
+        buf[len] = 0;
+        return @ptrCast(buf[0..len :0]);
+    }
+
+    fn getStatusCommand(self: *const BarConfig) []const u8 {
+        return self.status_command[0..self.status_command_len];
+    }
+};
+
+fn queryBarConfig(allocator: std.mem.Allocator, sock_path: []const u8) BarConfig {
+    var cfg = BarConfig{};
+    const default_font = "monospace:size=11";
+    @memcpy(cfg.font[0..default_font.len], default_font);
+    cfg.font_len = default_font.len;
+
+    const response = ipc.sendRequest(allocator, sock_path, .get_bar_config, "") orelse return cfg;
+    defer allocator.free(response);
+
+    // Parse font
+    if (std.mem.indexOf(u8, response, "\"font\":\"")) |pos| {
+        const start = pos + 8;
+        if (std.mem.indexOfScalar(u8, response[start..], '"')) |end| {
+            const len: u8 = @intCast(@min(end, 255));
+            @memcpy(cfg.font[0..len], response[start..][0..len]);
+            cfg.font_len = len;
+        }
+    }
+
+    // Parse bar_height
+    if (std.mem.indexOf(u8, response, "\"bar_height\":")) |pos| {
+        const start = pos + 13;
+        var num_end = start;
+        while (num_end < response.len and response[num_end] >= '0' and response[num_end] <= '9') : (num_end += 1) {}
+        if (num_end > start) {
+            cfg.bar_height = std.fmt.parseInt(u16, response[start..num_end], 10) catch 22;
+        }
+    }
+
+    // Parse status_command
+    if (std.mem.indexOf(u8, response, "\"status_command\":\"")) |pos| {
+        const start = pos + 18;
+        if (std.mem.indexOfScalar(u8, response[start..], '"')) |end| {
+            const len: u16 = @intCast(@min(end, 511));
+            @memcpy(cfg.status_command[0..len], response[start..][0..len]);
+            cfg.status_command_len = len;
+        }
+    }
+
+    return cfg;
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -116,7 +178,16 @@ pub fn main() !void {
     const sock_path = socket_override orelse
         (std.posix.getenv("I3SOCK") orelse default_path);
 
-    // 3. Discover outputs via IPC and create per-output bar windows
+    // 3. Query IPC for bar config BEFORE creating windows/fonts
+    const bar_cfg = queryBarConfig(allocator, sock_path);
+    const bar_height: u16 = bar_cfg.bar_height;
+
+    // Compute padding from bar height
+    const ws_button_pad: u16 = @max(bar_height / 2, 4);
+    const status_pad: u16 = @max(bar_height * 3 / 8, 3);
+    const separator_pad: u16 = @max(bar_height / 4, 2);
+
+    // 4. Discover outputs via IPC and create per-output bar windows
     var bars: [MAX_OUTPUTS]BarWindow = undefined;
     for (&bars) |*b| b.* = .{};
     var bar_count: usize = 0;
@@ -142,7 +213,7 @@ pub fn main() !void {
     const strut_atom = internAtom(conn, "_NET_WM_STRUT_PARTIAL");
 
     for (bars[0..bar_count]) |*bar| {
-        const bar_y: i16 = if (position_top) bar.output_y else bar.output_y + @as(i16, @intCast(bar.output_height)) - @as(i16, BAR_HEIGHT);
+        const bar_y: i16 = if (position_top) bar.output_y else bar.output_y + @as(i16, @intCast(bar.output_height)) - @as(i16, @intCast(bar_height));
         const win_id = c.xcb_generate_id(conn);
         bar.window_id = win_id;
 
@@ -159,7 +230,7 @@ pub fn main() !void {
             bar.x,
             bar_y,
             bar.width,
-            BAR_HEIGHT,
+            bar_height,
             0,
             c.XCB_WINDOW_CLASS_INPUT_OUTPUT,
             visual_id,
@@ -182,11 +253,11 @@ pub fn main() !void {
             const x_start: u32 = @intCast(@as(u32, @bitCast(@as(i32, bar.x))));
             const x_end: u32 = x_start + bar.width -| 1;
             if (position_top) {
-                strut[2] = BAR_HEIGHT; // top
+                strut[2] = bar_height; // top
                 strut[8] = x_start; // top_start_x
                 strut[9] = x_end; // top_end_x
             } else {
-                strut[3] = BAR_HEIGHT; // bottom
+                strut[3] = bar_height; // bottom
                 strut[10] = x_start; // bottom_start_x
                 strut[11] = x_end; // bottom_end_x
             }
@@ -200,8 +271,10 @@ pub fn main() !void {
     _ = c.XSync(dpy, 0);
 
     // 4. Init Xft
-    const font = c.XftFontOpenName(dpy, screen_num, FONT_NAME) orelse {
-        std.debug.print("zephwm-bar: cannot open font '{s}'\n", .{FONT_NAME});
+    var font_z_buf: [257]u8 = undefined;
+    const font_z = bar_cfg.getFontZ(&font_z_buf);
+    const font = c.XftFontOpenName(dpy, screen_num, font_z) orelse {
+        std.debug.print("zephwm-bar: cannot open font '{s}'\n", .{bar_cfg.font[0..bar_cfg.font_len]});
         return;
     };
     defer c.XftFontClose(dpy, font);
@@ -250,29 +323,12 @@ pub fn main() !void {
 
     // Spawn status_command and read from its stdout via pipe
     var status_pipe_fd: std.posix.fd_t = -1;
-    var status_command_len: usize = 0;
-    {
-        // Get status_command from bar config via IPC
-        const bar_cfg = ipc.sendRequest(allocator, sock_path, .get_bar_config, "") orelse null;
-        var status_cmd: ?[]const u8 = null;
-        if (bar_cfg) |cfg_json| {
-            defer allocator.free(cfg_json);
-            // Simple parse: find "status_command":"..."
-            if (std.mem.indexOf(u8, cfg_json, "\"status_command\":\"")) |pos| {
-                const start = pos + 18;
-                if (std.mem.indexOfScalar(u8, cfg_json[start..], '"')) |end| {
-                    status_cmd = cfg_json[start .. start + end];
-                }
-            }
-        }
-        if (status_cmd) |cmd| {
-            status_command_len = cmd.len;
-            if (cmd.len > 0) {
-                const spawn_result = spawnStatusCommand(cmd);
-                status_pipe_fd = spawn_result.stdout_fd;
-                status_stdin_fd = spawn_result.stdin_fd;
-            }
-        }
+    const status_cmd = bar_cfg.getStatusCommand();
+    const status_command_len = status_cmd.len;
+    if (status_command_len > 0) {
+        const spawn_result = spawnStatusCommand(status_cmd);
+        status_pipe_fd = spawn_result.stdout_fd;
+        status_stdin_fd = spawn_result.stdin_fd;
     }
 
     // Built-in status mode: when no status_command is configured, use built-in modules
@@ -325,7 +381,7 @@ pub fn main() !void {
     // Initial refresh + draw
     refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, &ws_count);
     for (bars[0..bar_count]) |*bar| {
-        drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, &focused_fg, &unfocused_fg, &fg_color);
+        drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, &focused_fg, &unfocused_fg, &fg_color, bar_height, ws_button_pad, status_pad, separator_pad);
     }
 
     while (running) {
@@ -350,7 +406,7 @@ pub fn main() !void {
                     // Find which bar window was exposed and redraw it
                     for (bars[0..bar_count]) |*bar| {
                         if (bar.window_id == expose_ev.window) {
-                            drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, &focused_fg, &unfocused_fg, &fg_color);
+                            drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, &focused_fg, &unfocused_fg, &fg_color, bar_height, ws_button_pad, status_pad, separator_pad);
                             break;
                         }
                     }
@@ -360,7 +416,7 @@ pub fn main() !void {
                     // Find which bar window was clicked
                     for (bars[0..bar_count]) |*bar| {
                         if (bar.window_id == bev.event) {
-                            handleClick(allocator, sock_path, bev.event_x, bev.detail, bev.event_y, bar, &ws_names, &ws_name_lens, &ws_outputs, &ws_output_lens, ws_count, font, dpy, &status_blocks, status_block_count, click_events_enabled, status_stdin_fd);
+                            handleClick(allocator, sock_path, bev.event_x, bev.detail, bev.event_y, bar, &ws_names, &ws_name_lens, &ws_outputs, &ws_output_lens, ws_count, font, dpy, &status_blocks, status_block_count, click_events_enabled, status_stdin_fd, bar_height, ws_button_pad);
                             break;
                         }
                     }
@@ -414,7 +470,7 @@ pub fn main() !void {
         refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, &ws_count);
         // Redraw all bars (workspace refresh always triggers redraw)
         for (bars[0..bar_count]) |*bar| {
-            drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, &focused_fg, &unfocused_fg, &fg_color);
+            drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, &focused_fg, &unfocused_fg, &fg_color, bar_height, ws_button_pad, status_pad, separator_pad);
         }
     }
 
@@ -538,6 +594,10 @@ fn drawBar(
     focused_fg: *c.XftColor,
     unfocused_fg: *c.XftColor,
     fg_color: *c.XftColor,
+    bar_height: u16,
+    ws_button_pad: u16,
+    status_pad: u16,
+    separator_pad: u16,
 ) void {
     const draw = bar.draw orelse return;
     const bar_win = bar.window_id;
@@ -547,10 +607,10 @@ fn drawBar(
     // Clear background
     const bg_values = [_]u32{BG_COLOR};
     _ = c.xcb_change_gc(conn, gc, c.XCB_GC_FOREGROUND, &bg_values);
-    const rect = [_]c.xcb_rectangle_t{.{ .x = 0, .y = 0, .width = bar_width, .height = BAR_HEIGHT }};
+    const rect = [_]c.xcb_rectangle_t{.{ .x = 0, .y = 0, .width = bar_width, .height = bar_height }};
     _ = c.xcb_poly_fill_rectangle(conn, bar_win, gc, 1, &rect);
 
-    const text_y: c_int = @intCast(font.*.ascent + 2);
+    const text_y: c_int = @divTrunc((@as(c_int, bar_height) - (font.*.ascent + font.*.descent)), 2) + font.*.ascent;
     var x: u16 = 0;
 
     // Draw workspace buttons — only workspaces belonging to this output
@@ -573,21 +633,21 @@ fn drawBar(
         // Calculate button width from text
         var extents: c.XGlyphInfo = undefined;
         c.XftTextExtentsUtf8(dpy, font, name.ptr, @intCast(name.len), &extents);
-        const btn_w: u16 = @intCast(@as(u32, @intCast(extents.xOff)) + WS_BUTTON_PAD * 2);
+        const btn_w: u16 = @intCast(@as(u32, @intCast(extents.xOff)) + ws_button_pad * 2);
 
         // Draw background for focused/urgent workspaces
         if (ws_focused[i] or ws_urgent[i]) {
             const bg = if (ws_urgent[i]) URGENT_BG else FOCUSED_BG;
             const bg_val = [_]u32{bg};
             _ = c.xcb_change_gc(conn, gc, c.XCB_GC_FOREGROUND, &bg_val);
-            const btn_rect = [_]c.xcb_rectangle_t{.{ .x = @intCast(x), .y = 0, .width = btn_w, .height = BAR_HEIGHT }};
+            const btn_rect = [_]c.xcb_rectangle_t{.{ .x = @intCast(x), .y = 0, .width = btn_w, .height = bar_height }};
             _ = c.xcb_poly_fill_rectangle(conn, bar_win, gc, 1, &btn_rect);
         }
 
         // Draw text
         _ = c.XSync(dpy, 0);
         const color = if (ws_focused[i]) focused_fg else if (ws_urgent[i]) focused_fg else unfocused_fg;
-        c.XftDrawStringUtf8(draw, color, font, @intCast(x + WS_BUTTON_PAD), text_y, name.ptr, @intCast(name.len));
+        c.XftDrawStringUtf8(draw, color, font, @intCast(x + ws_button_pad), text_y, name.ptr, @intCast(name.len));
 
         x += btn_w;
     }
@@ -598,7 +658,7 @@ fn drawBar(
         var sep_extents: c.XGlyphInfo = undefined;
         c.XftTextExtentsUtf8(dpy, font, sep_str.ptr, 1, &sep_extents);
         const sep_w: u16 = @intCast(sep_extents.xOff);
-        const sep_total_w: u16 = sep_w + SEPARATOR_PAD * 2;
+        const sep_total_w: u16 = sep_w + separator_pad * 2;
         var separator_color = xftColorFromU32(0x505060);
 
         var status_x: u16 = bar_width;
@@ -618,7 +678,7 @@ fn drawBar(
             // Account for separator to the left of this block (all except rightmost)
             const need_sep = drawn_count > 0;
             const sep_cost: u16 = if (need_sep) sep_total_w else 0;
-            const block_w: u16 = text_w + STATUS_PAD * 2;
+            const block_w: u16 = text_w + status_pad * 2;
             const total_cost = block_w + sep_cost;
 
             if (status_x < total_cost) break; // no room
@@ -626,7 +686,7 @@ fn drawBar(
             // Draw separator first (to the left of the previous block's left edge)
             if (need_sep) {
                 status_x -= sep_total_w;
-                c.XftDrawStringUtf8(draw, &separator_color, font, @intCast(status_x + SEPARATOR_PAD), text_y, sep_str.ptr, 1);
+                c.XftDrawStringUtf8(draw, &separator_color, font, @intCast(status_x + separator_pad), text_y, sep_str.ptr, 1);
             }
 
             status_x -= block_w;
@@ -641,7 +701,7 @@ fn drawBar(
                 text_color = xftColorFromU32(blk.color);
                 break :blk &text_color;
             } else fg_color;
-            c.XftDrawStringUtf8(draw, color_ptr, font, @intCast(status_x + STATUS_PAD), text_y, ft.ptr, @intCast(ft.len));
+            c.XftDrawStringUtf8(draw, color_ptr, font, @intCast(status_x + status_pad), text_y, ft.ptr, @intCast(ft.len));
 
             drawn_count += 1;
         }
@@ -670,6 +730,8 @@ fn handleClick(
     status_block_count: usize,
     click_events_enabled: bool,
     status_stdin_fd: std.posix.fd_t,
+    bar_height: u16,
+    ws_button_pad: u16,
 ) void {
     const bar_output = bar.getOutputName();
     // Determine which workspace button was clicked (only for this output's workspaces)
@@ -691,7 +753,7 @@ fn handleClick(
 
         var extents: c.XGlyphInfo = undefined;
         c.XftTextExtentsUtf8(dpy, font, name.ptr, @intCast(name.len), &extents);
-        const btn_w: u16 = @intCast(@as(u32, @intCast(extents.xOff)) + WS_BUTTON_PAD * 2);
+        const btn_w: u16 = @intCast(@as(u32, @intCast(extents.xOff)) + ws_button_pad * 2);
 
         if (click_x >= @as(i16, @intCast(x)) and click_x < @as(i16, @intCast(x + btn_w))) {
             // Send workspace switch command via IPC
@@ -725,7 +787,7 @@ fn handleClick(
                 cw.print(",\"relative_x\":{d},\"relative_y\":{d}", .{
                     click_x - bx, click_y,
                 }) catch {};
-                cw.print(",\"width\":{d},\"height\":{d}", .{ bw_val, BAR_HEIGHT }) catch {};
+                cw.print(",\"width\":{d},\"height\":{d}", .{ bw_val, bar_height }) catch {};
                 cw.writeAll("}\n") catch {};
                 _ = std.posix.write(status_stdin_fd, click_fbs.getWritten()) catch {};
                 break;
