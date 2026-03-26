@@ -28,9 +28,10 @@ pub const BarConfig = struct {
     enabled: bool = false,
     status_command: []const u8 = "",
     position: []const u8 = "bottom",
+    font: []const u8 = "monospace:size=11",
     bg_color: []const u8 = "#222222",
     statusline_color: []const u8 = "#dddddd",
-    height: u16 = 16,
+    height: u16 = 22,
 };
 
 pub const WindowRule = struct {
@@ -85,6 +86,7 @@ pub const Config = struct {
     bar: BarConfig = .{},
     bar_status_command_owned: bool = false,
     bar_position_owned: bool = false,
+    bar_font_owned: bool = false,
     bar_bg_color_owned: bool = false,
     bar_statusline_color_owned: bool = false,
     // Rules
@@ -173,6 +175,10 @@ pub const Config = struct {
                 } else if (std.mem.startsWith(u8, line, "height ")) {
                     const raw = std.mem.trim(u8, line["height ".len..], " \t");
                     cfg.bar.height = std.fmt.parseInt(u16, raw, 10) catch cfg.bar.height;
+                } else if (std.mem.startsWith(u8, line, "font ")) {
+                    if (cfg.bar_font_owned) cfg.allocator.free(cfg.bar.font);
+                    cfg.bar.font = try allocator.dupe(u8, std.mem.trim(u8, line["font ".len..], " \t"));
+                    cfg.bar_font_owned = true;
                 } else if (std.mem.startsWith(u8, line, "colors {") or std.mem.eql(u8, line, "colors {")) {
                     in_bar_colors = true;
                 }
@@ -549,6 +555,7 @@ pub const Config = struct {
         if (self.bar_position_owned) self.allocator.free(self.bar.position);
         if (self.bar_bg_color_owned) self.allocator.free(self.bar.bg_color);
         if (self.bar_statusline_color_owned) self.allocator.free(self.bar.statusline_color);
+        if (self.bar_font_owned) self.allocator.free(self.bar.font);
 
         self.allocator.free(self.raw_text);
     }

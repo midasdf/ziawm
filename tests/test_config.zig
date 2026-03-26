@@ -235,7 +235,7 @@ test "bar block uses default height when not specified" {
     const input = "bar {\n    position top\n}\n";
     var cfg = try config.Config.parse(std.testing.allocator, input);
     defer cfg.deinit();
-    try std.testing.expectEqual(@as(u16, 16), cfg.bar.height);
+    try std.testing.expectEqual(@as(u16, 22), cfg.bar.height);
 }
 
 test "no bar block leaves enabled false" {
@@ -256,4 +256,28 @@ test "unknown lines silently skipped" {
 
     // Should not error, border_px set correctly
     try std.testing.expectEqual(@as(u32, 1), cfg.border_px);
+}
+
+test "bar font parsing" {
+    const input =
+        \\bar {
+        \\    font DejaVu Sans Mono:size=10
+        \\    position top
+        \\}
+    ;
+    var cfg = try config.Config.parse(std.testing.allocator, input);
+    defer cfg.deinit();
+    try std.testing.expectEqualStrings("DejaVu Sans Mono:size=10", cfg.bar.font);
+    try std.testing.expect(cfg.bar.enabled);
+}
+
+test "bar height default is 22" {
+    const input =
+        \\bar {
+        \\    position top
+        \\}
+    ;
+    var cfg = try config.Config.parse(std.testing.allocator, input);
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(u16, 22), cfg.bar.height);
 }

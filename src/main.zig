@@ -316,6 +316,9 @@ fn buildBarConfigJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
     jsonEscapeWrite(w, cfg.bar.status_command) catch return "{}";
     w.writeAll("\",\"bar_height\":") catch return "{}";
     w.print("{d}", .{cfg.bar.height}) catch return "{}";
+    w.writeAll(",\"font\":\"") catch return "{}";
+    jsonEscapeWrite(w, cfg.bar.font) catch return "{}";
+    w.writeAll("\"") catch return "{}";
     w.writeAll(",\"colors\":{\"background\":\"") catch return "{}";
     jsonEscapeWrite(w, cfg.bar.bg_color) catch return "{}";
     w.writeAll("\",\"statusline\":\"") catch return "{}";
