@@ -39,6 +39,8 @@ pub const EventContext = struct {
     border_focus_color: u32,
     border_unfocus_color: u32,
     randr_base_event: u8 = 0,
+    screen_width: u16 = 0,
+    screen_height: u16 = 0,
     /// O(1) window ID → container lookup. Updated on map/unmap/destroy.
     window_map: WindowMap = .{},
     /// IPC subscription tracking: fd → event bitmask. -1 = unused slot.

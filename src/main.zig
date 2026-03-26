@@ -290,9 +290,14 @@ fn buildOutputsJson(ctx: *event.EventContext, buf: *[8192]u8) []const u8 {
         is_primary = false;
     }
 
-    // If no outputs in tree, return a single default entry
+    // If no outputs in tree, return a single default entry using actual screen size
     if (first) {
-        return "[{\"name\":\"default\",\"active\":true,\"primary\":true,\"rect\":{\"x\":0,\"y\":0,\"width\":720,\"height\":720},\"current_workspace\":\"1\"}]";
+        var fallback_fbs = std.io.fixedBufferStream(buf);
+        const fw = fallback_fbs.writer();
+        fw.print("[{{\"name\":\"default\",\"active\":true,\"primary\":true," ++
+            "\"rect\":{{\"x\":0,\"y\":0,\"width\":{d},\"height\":{d}}}," ++
+            "\"current_workspace\":\"1\"}}]", .{ ctx.screen_width, ctx.screen_height }) catch return "[]";
+        return fallback_fbs.getWritten();
     }
 
     w.writeByte(']') catch return "[]";
@@ -780,6 +785,8 @@ pub fn main() !void {
         .border_focus_color = border_focus_color,
         .border_unfocus_color = border_unfocus_color,
         .randr_base_event = randr_base_event,
+        .screen_width = screen.width_in_pixels,
+        .screen_height = screen.height_in_pixels,
         .ipc_sub_fds = &ipc_sub_fds,
         .ipc_sub_masks = &ipc_sub_masks,
     };
