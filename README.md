@@ -4,9 +4,26 @@
 
 Born out of frustration with running i3 on a [HackberryPi Zero](https://github.com/ZitaoTech/Hackberry-Pi_Zero) (RPi Zero 2W, 512MB RAM) where everything felt sluggish — i3 plus its dependencies consumed precious memory and every operation had noticeable latency. zephwm strips away GLib, pango, cairo, and other heavy dependencies, using xcb directly and keeping the entire WM under 200KB. It speaks the i3 IPC protocol, reads i3-style config files, and supports the core i3 workflow: tree-based container management with horizontal/vertical splits, tabbed and stacked layouts, workspaces, and keybind-driven operation.
 
+## zephwm vs i3
+
+Measured on x86\_64 with a single 720x720 display, 20 windows across 2 workspaces.
+
+| | **zephwm + bar** | **i3 + i3bar** |
+|---|---|---|
+| RSS (total) | 4.5 MB | 54.6 MB |
+| PSS (proportional) | ~600 KB | 33.8 MB |
+| Private memory (RssAnon) | 420 KB | 4.2 MB |
+| Binary size (aarch64) | 220 KB | 396 KB\* |
+| Shared libraries | 3 | 20+ |
+| Build deps | xcb, xcb-randr | xcb, glib, pango, cairo, pcre2, ... |
+
+\*i3 binary only; does not include i3bar, i3-msg, or other components.
+
+zephwm implements the i3 IPC protocol and reads i3-style config files, so existing tools (i3blocks, polybar, rofi, i3-msg) work without modification.
+
 ## Status
 
-**v0.3.0 — Functional.** Core tiling, multi-monitor, status bar, frame windows (reparenting WM), and all essential i3 commands work. 576+ tests pass with zero memory leaks.
+**Functional** — core tiling, multi-monitor, status bar, frame windows (reparenting WM), and all essential i3 commands work. 576+ tests pass with zero memory leaks.
 
 ### Implemented
 
@@ -35,7 +52,7 @@ Born out of frustration with running i3 on a [HackberryPi Zero](https://github.c
 - assign rules (criteria-based workspace assignment)
 - Criteria matching: class, instance, title, window_role, window_type, floating, workspace (glob wildcards)
 - EWMH properties (_NET_SUPPORTED, _NET_ACTIVE_WINDOW, _NET_CURRENT_DESKTOP, _NET_CLIENT_LIST, etc.)
-- Status bar (zephwm-bar: workspace buttons, status text, click-to-switch, Xft rendering)
+- Status bar (zephwm-bar: workspace buttons, status text, click-to-switch, XCB core font rendering)
 - Inner/outer gaps
 - Custom border width and colors
 - Workspace-output config assignments (`workspace N output NAME`)
@@ -72,7 +89,7 @@ zephwm/
 │   ├── command.zig       i3 command string parser
 │   ├── criteria.zig      [class="X" title="Y*"] matcher with glob
 │   ├── ipc.zig           i3-ipc binary protocol (shared by all binaries)
-│   ├── xcb.zig           XCB/RandR C bindings via @cImport
+│   ├── xcb.zig           XCB/RandR C bindings + pure-Zig KeyMap
 │   ├── atoms.zig         EWMH/ICCCM atom management
 │   ├── render.zig        Apply layout geometry to X windows
 │   ├── workspace.zig     Workspace find/create helpers
@@ -82,7 +99,7 @@ zephwm/
 ├── zephwm-msg/
 │   └── main.zig          IPC client CLI (like i3-msg)
 ├── zephwm-bar/
-│   └── main.zig          Status bar (XCB + Xft)
+│   └── main.zig          Status bar (XCB core fonts, no Xft)
 ├── tests/                110+ unit tests
 ├── config/
 │   └── default_config    Default i3-compatible config
@@ -97,13 +114,13 @@ zephwm/
 Requires **Zig 0.15.0+** and the following system libraries:
 
 ```
-xcb xcb-keysyms xcb-randr xcb-xkb xkbcommon xkbcommon-x11 X11 X11-xcb xft fontconfig
+xcb xcb-randr
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S libxcb xcb-util-keysyms libxkbcommon libxft fontconfig libx11
+sudo pacman -S libxcb
 ```
 
 ### Build
@@ -130,12 +147,11 @@ bash test_xephyr_visual.sh       # 170 pixel verification tests (10 resolutions)
 
 ### Cross-compile for aarch64
 
-Requires an aarch64 sysroot with xcb/xkbcommon libraries. For HackberryPi, building natively on the device is recommended:
-
 ```bash
-# On HackberryPi (aarch64)
-zig build -Doptimize=ReleaseSmall
+zig build -Doptimize=ReleaseSmall -Dtarget=aarch64-linux-gnu
 ```
+
+Requires an aarch64 sysroot with xcb libraries (see `build.zig` for sysroot path configuration).
 
 ## Usage
 
@@ -238,14 +254,15 @@ The socket path is set in `$I3SOCK` and on the X root window as `I3_SOCKET_PATH`
 | Library | Purpose |
 |---------|---------|
 | libxcb | X11 protocol |
-| xcb-keysyms | Key symbol lookup |
-| xcb-randr | Multi-monitor support |
-| xcb-xkb | Keyboard extension |
-| libxkbcommon | Keysym name resolution |
-| libxkbcommon-x11 | X11 keyboard integration |
-| libX11 + libX11-xcb | Xlib-XCB bridge (for zephwm-bar Xft) |
-| libxft | Font rendering (zephwm-bar) |
-| fontconfig | Font configuration (zephwm-bar) |
+| libxcb-randr | Multi-monitor (XRandR 1.5) |
+
+That's it. The following were **eliminated** with built-in Zig implementations:
+
+| Removed | Replaced by |
+|---------|-------------|
+| libxkbcommon | Built-in keysym lookup table (104 entries) |
+| xcb-keysyms | Pure-Zig `KeyMap` using XCB `GetKeyboardMapping` |
+| libXft, libX11, libfontconfig, libfreetype, libharfbuzz | XCB core fonts (`xcb_image_text_8`) |
 
 No GLib, pango, cairo, or other heavy dependencies. Linux only (uses epoll and signalfd).
 
