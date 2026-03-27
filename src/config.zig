@@ -73,22 +73,39 @@ pub const Config = struct {
     focused_inactive_bg: []const u8 = "#5f676a",
     focused_inactive_text: []const u8 = "#ffffff",
     hide_edge_borders: HideEdgeBorders = .none,
-    focused_border_owned: bool = false,
-    focused_bg_owned: bool = false,
-    focused_text_owned: bool = false,
-    unfocused_border_owned: bool = false,
-    unfocused_bg_owned: bool = false,
-    unfocused_text_owned: bool = false,
-    focused_inactive_border_owned: bool = false,
-    focused_inactive_bg_owned: bool = false,
-    focused_inactive_text_owned: bool = false,
+    // Bitmask tracking which string fields are heap-allocated (must free on deinit)
+    const OwnedFlag = enum(u16) {
+        focused_border = 1 << 0,
+        focused_bg = 1 << 1,
+        focused_text = 1 << 2,
+        unfocused_border = 1 << 3,
+        unfocused_bg = 1 << 4,
+        unfocused_text = 1 << 5,
+        focused_inactive_border = 1 << 6,
+        focused_inactive_bg = 1 << 7,
+        focused_inactive_text = 1 << 8,
+        bar_status_command = 1 << 9,
+        bar_position = 1 << 10,
+        bar_font = 1 << 11,
+        bar_bg_color = 1 << 12,
+        bar_statusline_color = 1 << 13,
+    };
+    owned: u16 = 0,
+
+    fn isOwned(self: *const Config, flag: OwnedFlag) bool {
+        return (self.owned & @intFromEnum(flag)) != 0;
+    }
+
+    fn setOwned(self: *Config, flag: OwnedFlag) void {
+        self.owned |= @intFromEnum(flag);
+    }
+
+    fn freeIfOwned(self: *Config, flag: OwnedFlag, ptr: []const u8) void {
+        if (self.isOwned(flag)) self.allocator.free(ptr);
+    }
+
     // Bar
     bar: BarConfig = .{},
-    bar_status_command_owned: bool = false,
-    bar_position_owned: bool = false,
-    bar_font_owned: bool = false,
-    bar_bg_color_owned: bool = false,
-    bar_statusline_color_owned: bool = false,
     // Rules
     window_rules: ArrayListManaged(WindowRule),
     assign_rules: ArrayListManaged(AssignRule),
@@ -99,9 +116,6 @@ pub const Config = struct {
     workspace_outputs: ArrayListManaged(WorkspaceOutput),
     // Mode names (known modes besides "default")
     modes: StringHashMapManaged(void),
-    // Raw config text (owned copy)
-    raw_text: []const u8,
-
     pub fn parse(allocator: Allocator, text: []const u8) !Config {
         var cfg = Config{
             .allocator = allocator,
@@ -113,7 +127,6 @@ pub const Config = struct {
             .exec_always_cmds = ArrayListManaged([]const u8).init(allocator),
             .workspace_outputs = ArrayListManaged(WorkspaceOutput).init(allocator),
             .modes = StringHashMapManaged(void).init(allocator),
-            .raw_text = try allocator.dupe(u8, text),
         };
         errdefer cfg.deinit();
 
@@ -151,13 +164,13 @@ pub const Config = struct {
             // Inside bar colors block
             if (in_bar_colors) {
                 if (std.mem.startsWith(u8, line, "background ")) {
-                    if (cfg.bar_bg_color_owned) cfg.allocator.free(cfg.bar.bg_color);
+                    cfg.freeIfOwned(.bar_bg_color, cfg.bar.bg_color);
                     cfg.bar.bg_color = try allocator.dupe(u8, std.mem.trim(u8, line["background ".len..], " \t"));
-                    cfg.bar_bg_color_owned = true;
+                    cfg.setOwned(.bar_bg_color);
                 } else if (std.mem.startsWith(u8, line, "statusline ")) {
-                    if (cfg.bar_statusline_color_owned) cfg.allocator.free(cfg.bar.statusline_color);
+                    cfg.freeIfOwned(.bar_statusline_color, cfg.bar.statusline_color);
                     cfg.bar.statusline_color = try allocator.dupe(u8, std.mem.trim(u8, line["statusline ".len..], " \t"));
-                    cfg.bar_statusline_color_owned = true;
+                    cfg.setOwned(.bar_statusline_color);
                 }
                 continue;
             }
@@ -165,20 +178,20 @@ pub const Config = struct {
             // Inside bar block
             if (in_bar) {
                 if (std.mem.startsWith(u8, line, "status_command ")) {
-                    if (cfg.bar_status_command_owned) cfg.allocator.free(cfg.bar.status_command);
+                    cfg.freeIfOwned(.bar_status_command, cfg.bar.status_command);
                     cfg.bar.status_command = try allocator.dupe(u8, std.mem.trim(u8, line["status_command ".len..], " \t"));
-                    cfg.bar_status_command_owned = true;
+                    cfg.setOwned(.bar_status_command);
                 } else if (std.mem.startsWith(u8, line, "position ")) {
-                    if (cfg.bar_position_owned) cfg.allocator.free(cfg.bar.position);
+                    cfg.freeIfOwned(.bar_position, cfg.bar.position);
                     cfg.bar.position = try allocator.dupe(u8, std.mem.trim(u8, line["position ".len..], " \t"));
-                    cfg.bar_position_owned = true;
+                    cfg.setOwned(.bar_position);
                 } else if (std.mem.startsWith(u8, line, "height ")) {
                     const raw = std.mem.trim(u8, line["height ".len..], " \t");
                     cfg.bar.height = std.fmt.parseInt(u16, raw, 10) catch cfg.bar.height;
                 } else if (std.mem.startsWith(u8, line, "font ")) {
-                    if (cfg.bar_font_owned) cfg.allocator.free(cfg.bar.font);
+                    cfg.freeIfOwned(.bar_font, cfg.bar.font);
                     cfg.bar.font = try allocator.dupe(u8, std.mem.trim(u8, line["font ".len..], " \t"));
-                    cfg.bar_font_owned = true;
+                    cfg.setOwned(.bar_font);
                 } else if (std.mem.startsWith(u8, line, "colors {") or std.mem.eql(u8, line, "colors {")) {
                     in_bar_colors = true;
                 }
@@ -398,19 +411,19 @@ pub const Config = struct {
                 const rest = std.mem.trim(u8, line["client.focused ".len..], " \t");
                 var tok_iter = std.mem.tokenizeScalar(u8, rest, ' ');
                 if (tok_iter.next()) |border| {
-                    if (cfg.focused_border_owned) cfg.allocator.free(cfg.focused_border);
+                    cfg.freeIfOwned(.focused_border, cfg.focused_border);
                     cfg.focused_border = try allocator.dupe(u8, border);
-                    cfg.focused_border_owned = true;
+                    cfg.setOwned(.focused_border);
                 }
                 if (tok_iter.next()) |bg| {
-                    if (cfg.focused_bg_owned) cfg.allocator.free(cfg.focused_bg);
+                    cfg.freeIfOwned(.focused_bg, cfg.focused_bg);
                     cfg.focused_bg = try allocator.dupe(u8, bg);
-                    cfg.focused_bg_owned = true;
+                    cfg.setOwned(.focused_bg);
                 }
                 if (tok_iter.next()) |text_col| {
-                    if (cfg.focused_text_owned) cfg.allocator.free(cfg.focused_text);
+                    cfg.freeIfOwned(.focused_text, cfg.focused_text);
                     cfg.focused_text = try allocator.dupe(u8, text_col);
-                    cfg.focused_text_owned = true;
+                    cfg.setOwned(.focused_text);
                 }
                 continue;
             }
@@ -420,19 +433,19 @@ pub const Config = struct {
                 const rest = std.mem.trim(u8, line["client.unfocused ".len..], " \t");
                 var tok_iter = std.mem.tokenizeScalar(u8, rest, ' ');
                 if (tok_iter.next()) |border| {
-                    if (cfg.unfocused_border_owned) cfg.allocator.free(cfg.unfocused_border);
+                    cfg.freeIfOwned(.unfocused_border, cfg.unfocused_border);
                     cfg.unfocused_border = try allocator.dupe(u8, border);
-                    cfg.unfocused_border_owned = true;
+                    cfg.setOwned(.unfocused_border);
                 }
                 if (tok_iter.next()) |bg| {
-                    if (cfg.unfocused_bg_owned) cfg.allocator.free(cfg.unfocused_bg);
+                    cfg.freeIfOwned(.unfocused_bg, cfg.unfocused_bg);
                     cfg.unfocused_bg = try allocator.dupe(u8, bg);
-                    cfg.unfocused_bg_owned = true;
+                    cfg.setOwned(.unfocused_bg);
                 }
                 if (tok_iter.next()) |text_col| {
-                    if (cfg.unfocused_text_owned) cfg.allocator.free(cfg.unfocused_text);
+                    cfg.freeIfOwned(.unfocused_text, cfg.unfocused_text);
                     cfg.unfocused_text = try allocator.dupe(u8, text_col);
-                    cfg.unfocused_text_owned = true;
+                    cfg.setOwned(.unfocused_text);
                 }
                 continue;
             }
@@ -442,19 +455,19 @@ pub const Config = struct {
                 const rest = std.mem.trim(u8, line["client.focused_inactive ".len..], " \t");
                 var tok_iter = std.mem.tokenizeScalar(u8, rest, ' ');
                 if (tok_iter.next()) |border| {
-                    if (cfg.focused_inactive_border_owned) cfg.allocator.free(cfg.focused_inactive_border);
+                    cfg.freeIfOwned(.focused_inactive_border, cfg.focused_inactive_border);
                     cfg.focused_inactive_border = try allocator.dupe(u8, border);
-                    cfg.focused_inactive_border_owned = true;
+                    cfg.setOwned(.focused_inactive_border);
                 }
                 if (tok_iter.next()) |bg| {
-                    if (cfg.focused_inactive_bg_owned) cfg.allocator.free(cfg.focused_inactive_bg);
+                    cfg.freeIfOwned(.focused_inactive_bg, cfg.focused_inactive_bg);
                     cfg.focused_inactive_bg = try allocator.dupe(u8, bg);
-                    cfg.focused_inactive_bg_owned = true;
+                    cfg.setOwned(.focused_inactive_bg);
                 }
                 if (tok_iter.next()) |text_col| {
-                    if (cfg.focused_inactive_text_owned) cfg.allocator.free(cfg.focused_inactive_text);
+                    cfg.freeIfOwned(.focused_inactive_text, cfg.focused_inactive_text);
                     cfg.focused_inactive_text = try allocator.dupe(u8, text_col);
-                    cfg.focused_inactive_text_owned = true;
+                    cfg.setOwned(.focused_inactive_text);
                 }
                 continue;
             }
@@ -479,6 +492,14 @@ pub const Config = struct {
 
             // Unknown lines: silently skip
         }
+
+        // パース完了後、余分なcapacityを解放
+        cfg.keybinds.shrinkAndFree(cfg.keybinds.items.len);
+        cfg.window_rules.shrinkAndFree(cfg.window_rules.items.len);
+        cfg.assign_rules.shrinkAndFree(cfg.assign_rules.items.len);
+        cfg.exec_cmds.shrinkAndFree(cfg.exec_cmds.items.len);
+        cfg.exec_always_cmds.shrinkAndFree(cfg.exec_always_cmds.items.len);
+        cfg.workspace_outputs.shrinkAndFree(cfg.workspace_outputs.items.len);
 
         return cfg;
     }
@@ -542,22 +563,21 @@ pub const Config = struct {
         }
         self.modes.deinit();
 
-        // Free owned color strings
-        if (self.focused_border_owned) self.allocator.free(self.focused_border);
-        if (self.focused_bg_owned) self.allocator.free(self.focused_bg);
-        if (self.focused_text_owned) self.allocator.free(self.focused_text);
-        if (self.unfocused_border_owned) self.allocator.free(self.unfocused_border);
-        if (self.unfocused_bg_owned) self.allocator.free(self.unfocused_bg);
-        if (self.unfocused_text_owned) self.allocator.free(self.unfocused_text);
-
-        // Free owned bar strings
-        if (self.bar_status_command_owned) self.allocator.free(self.bar.status_command);
-        if (self.bar_position_owned) self.allocator.free(self.bar.position);
-        if (self.bar_bg_color_owned) self.allocator.free(self.bar.bg_color);
-        if (self.bar_statusline_color_owned) self.allocator.free(self.bar.statusline_color);
-        if (self.bar_font_owned) self.allocator.free(self.bar.font);
-
-        self.allocator.free(self.raw_text);
+        // Free owned color and bar strings via bitmask
+        self.freeIfOwned(.focused_border, self.focused_border);
+        self.freeIfOwned(.focused_bg, self.focused_bg);
+        self.freeIfOwned(.focused_text, self.focused_text);
+        self.freeIfOwned(.unfocused_border, self.unfocused_border);
+        self.freeIfOwned(.unfocused_bg, self.unfocused_bg);
+        self.freeIfOwned(.unfocused_text, self.unfocused_text);
+        self.freeIfOwned(.focused_inactive_border, self.focused_inactive_border);
+        self.freeIfOwned(.focused_inactive_bg, self.focused_inactive_bg);
+        self.freeIfOwned(.focused_inactive_text, self.focused_inactive_text);
+        self.freeIfOwned(.bar_status_command, self.bar.status_command);
+        self.freeIfOwned(.bar_position, self.bar.position);
+        self.freeIfOwned(.bar_font, self.bar.font);
+        self.freeIfOwned(.bar_bg_color, self.bar.bg_color);
+        self.freeIfOwned(.bar_statusline_color, self.bar.statusline_color);
     }
 };
 

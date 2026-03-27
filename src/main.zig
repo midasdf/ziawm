@@ -170,6 +170,12 @@ fn handleIpcMessage(ctx: *event.EventContext, client_fd: std.posix.fd_t, msg_typ
     };
 
     ipc.writeResponse(client_fd, msg_type, response) catch {};
+
+    // Free dynamic tree JSON buffer after sending (it grows unbounded otherwise)
+    if (msg_type == @intFromEnum(ipc.MessageType.get_tree)) {
+        tree_json_buf.deinit(ctx.allocator);
+        tree_json_buf = .empty;
+    }
 }
 
 /// Build JSON for GET_WORKSPACES response.
@@ -522,9 +528,8 @@ fn parseColor(color_str: []const u8) u32 {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // GPAはアロケーション毎に~32Bのメタデータを持つ。libc mallocで軽量化。
+    const allocator = std.heap.c_allocator;
 
     // Parse args: --version, --help
     var args = std.process.args();
