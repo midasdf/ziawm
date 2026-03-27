@@ -588,6 +588,18 @@ pub fn main() !void {
         }
     }
 
+    // 3b. Set root cursor to left_ptr (XC_left_ptr = 68)
+    {
+        const cursor_font = xcb.generateId(conn);
+        _ = xcb.openFont(conn, cursor_font, "cursor", 6);
+        const cursor_id = xcb.generateId(conn);
+        _ = xcb.createGlyphCursor(conn, cursor_id, cursor_font, cursor_font, 68, 69, 0, 0, 0, 0xFFFF, 0xFFFF, 0xFFFF);
+        const cursor_val = [_]u32{cursor_id};
+        _ = xcb.changeWindowAttributes(conn, root_window, xcb.c.XCB_CW_CURSOR, &cursor_val);
+        _ = xcb.closeFont(conn, cursor_font);
+        _ = xcb.flush(conn);
+    }
+
     // 4. Init atoms
     const atoms = atoms_mod.Atoms.init(conn);
 
@@ -667,8 +679,8 @@ pub fn main() !void {
     }
 
     // 7b. Allocate key symbols
-    const key_symbols = xcb.keySymbolsAlloc(conn);
-    defer if (key_symbols) |syms| xcb.keySymbolsFree(syms);
+    var key_map = xcb.KeyMap.init(conn);
+    defer if (key_map) |*km| km.deinit();
 
     // 7c. Setup IPC socket
     var sock_path_buf: [256]u8 = undefined;
@@ -791,7 +803,7 @@ pub fn main() !void {
         .current_mode = event.DEFAULT_MODE,
         .focus_follows_mouse = if (config) |cfg| cfg.focus_follows_mouse else true,
         .config = if (config) |*cfg| cfg else null,
-        .key_symbols = key_symbols,
+        .key_map = key_map,
         .border_focus_color = border_focus_color,
         .border_unfocus_color = border_unfocus_color,
         .randr_base_event = randr_base_event,

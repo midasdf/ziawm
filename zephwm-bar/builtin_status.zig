@@ -1,8 +1,6 @@
 const std = @import("std");
 
-const x11 = @cImport({
-    @cInclude("X11/Xlib.h");
-    @cInclude("X11/Xatom.h");
+const c = @cImport({
     @cInclude("time.h");
 });
 
@@ -180,9 +178,9 @@ pub fn updateAll(state: *ModuleState, now: i64, outputs: *[MODULE_COUNT]ModuleOu
     // --- Clock (index 6) ---
     {
         const epoch = std.time.timestamp();
-        var c_time: x11.time_t = @intCast(epoch);
-        var tm: x11.struct_tm = undefined;
-        _ = x11.localtime_r(&c_time, &tm);
+        var c_time: c.time_t = @intCast(epoch);
+        var tm: c.struct_tm = undefined;
+        _ = c.localtime_r(&c_time, &tm);
         const minute: i8 = @intCast(tm.tm_min);
         if (minute != state.clock_last_minute) {
             state.clock_last_minute = minute;
@@ -348,77 +346,6 @@ pub fn getImeStateViaRemote() ImeState {
     return classifyIme(im_name);
 }
 
-/// Read the _FCITX_CURRENT_IM property from the X root window (legacy).
-/// Returns the IME classification (japanese, direct, or unavailable).
-pub fn readImeProperty(display: *anyopaque, root: u64) ImeState {
-    const dpy: *x11.Display = @ptrCast(@alignCast(display));
-    const root_win: x11.Window = @intCast(root);
-
-    // Get the atom for _FCITX_CURRENT_IM
-    const atom = x11.XInternAtom(dpy, "_FCITX_CURRENT_IM", 1); // only_if_exists=True
-    if (atom == 0) return .unavailable;
-
-    var actual_type: x11.Atom = undefined;
-    var actual_format: c_int = undefined;
-    var nitems: c_ulong = undefined;
-    var bytes_after: c_ulong = undefined;
-    var prop_data: ?[*]u8 = null;
-
-    const status = x11.XGetWindowProperty(
-        dpy,
-        root_win,
-        atom,
-        0, // offset
-        256, // length (in 32-bit units)
-        0, // delete = False
-        x11.XA_STRING,
-        &actual_type,
-        &actual_format,
-        &nitems,
-        &bytes_after,
-        @ptrCast(&prop_data),
-    );
-
-    if (status != 0 or prop_data == null or nitems == 0) {
-        if (prop_data) |p| _ = x11.XFree(p);
-        // Also try AnyPropertyType in case the type isn't XA_STRING
-        var actual_type2: x11.Atom = undefined;
-        var actual_format2: c_int = undefined;
-        var nitems2: c_ulong = undefined;
-        var bytes_after2: c_ulong = undefined;
-        var prop_data2: ?[*]u8 = null;
-
-        const status2 = x11.XGetWindowProperty(
-            dpy,
-            root_win,
-            atom,
-            0,
-            256,
-            0,
-            0, // AnyPropertyType
-            &actual_type2,
-            &actual_format2,
-            &nitems2,
-            &bytes_after2,
-            @ptrCast(&prop_data2),
-        );
-
-        if (status2 != 0 or prop_data2 == null or nitems2 == 0) {
-            if (prop_data2) |p| _ = x11.XFree(p);
-            return .unavailable;
-        }
-
-        const im_name = prop_data2.?[0..nitems2];
-        const result = classifyIme(im_name);
-        _ = x11.XFree(prop_data2.?);
-        return result;
-    }
-
-    const im_name = prop_data.?[0..nitems];
-    const result = classifyIme(im_name);
-    _ = x11.XFree(prop_data.?);
-    return result;
-}
 
 // --- Task 8: CPU ---
 

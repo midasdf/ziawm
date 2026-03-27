@@ -15,6 +15,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Cross-compile library search path (aarch64 sysroot)
+    const sysroot_lib: ?std.Build.LazyPath = if (target.result.cpu.arch == .aarch64 and target.result.os.tag == .linux)
+        .{ .cwd_relative = "/home/midasdf/zt-aarch64-sysroot/usr/lib" }
+    else
+        null;
+    const sysroot_inc: ?std.Build.LazyPath = if (target.result.cpu.arch == .aarch64 and target.result.os.tag == .linux)
+        .{ .cwd_relative = "/home/midasdf/zt-aarch64-sysroot/include" }
+    else
+        null;
+
     // --- zephwm (main WM) ---
     const zephwm_exe = b.addExecutable(.{
         .name = "zephwm",
@@ -26,12 +36,10 @@ pub fn build(b: *std.Build) void {
             .single_threaded = single_threaded,
         }),
     });
+    if (sysroot_lib) |p| zephwm_exe.addLibraryPath(p);
+    if (sysroot_inc) |p| zephwm_exe.addSystemIncludePath(p);
     zephwm_exe.linkSystemLibrary("xcb");
-    zephwm_exe.linkSystemLibrary("xcb-keysyms");
     zephwm_exe.linkSystemLibrary("xcb-randr");
-    zephwm_exe.linkSystemLibrary("xcb-xkb");
-    zephwm_exe.linkSystemLibrary("xkbcommon");
-    zephwm_exe.linkSystemLibrary("xkbcommon-x11");
     zephwm_exe.linkLibC();
     b.installArtifact(zephwm_exe);
 
@@ -49,6 +57,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    if (sysroot_lib) |p| msg_exe.addLibraryPath(p);
+    if (sysroot_inc) |p| msg_exe.addSystemIncludePath(p);
     msg_exe.linkSystemLibrary("xcb");
     msg_exe.linkLibC();
     b.installArtifact(msg_exe);
@@ -60,7 +70,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    builtin_status_mod.linkSystemLibrary("X11", .{});
+    // builtin_status only needs libc (for localtime_r), no X11/xcb
 
     // --- zephwm-bar ---
     const bar_exe = b.addExecutable(.{
@@ -77,11 +87,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    if (sysroot_lib) |p| bar_exe.addLibraryPath(p);
+    if (sysroot_inc) |p| bar_exe.addSystemIncludePath(p);
     bar_exe.linkSystemLibrary("xcb");
-    bar_exe.linkSystemLibrary("X11");
-    bar_exe.linkSystemLibrary("X11-xcb");
-    bar_exe.linkSystemLibrary("xft");
-    bar_exe.linkSystemLibrary("fontconfig");
     bar_exe.linkLibC();
     b.installArtifact(bar_exe);
 

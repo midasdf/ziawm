@@ -74,6 +74,20 @@ pub const Config = struct {
     focused_inactive_text: []const u8 = "#ffffff",
     hide_edge_borders: HideEdgeBorders = .none,
     // Bitmask tracking which string fields are heap-allocated (must free on deinit)
+    owned: u16 = 0,
+    // Bar
+    bar: BarConfig = .{},
+    // Rules
+    window_rules: ArrayListManaged(WindowRule),
+    assign_rules: ArrayListManaged(AssignRule),
+    // Exec commands
+    exec_cmds: ArrayListManaged([]const u8),
+    exec_always_cmds: ArrayListManaged([]const u8),
+    // Workspace -> output
+    workspace_outputs: ArrayListManaged(WorkspaceOutput),
+    // Mode names (known modes besides "default")
+    modes: StringHashMapManaged(void),
+
     const OwnedFlag = enum(u16) {
         focused_border = 1 << 0,
         focused_bg = 1 << 1,
@@ -90,7 +104,6 @@ pub const Config = struct {
         bar_bg_color = 1 << 12,
         bar_statusline_color = 1 << 13,
     };
-    owned: u16 = 0,
 
     fn isOwned(self: *const Config, flag: OwnedFlag) bool {
         return (self.owned & @intFromEnum(flag)) != 0;
@@ -104,18 +117,6 @@ pub const Config = struct {
         if (self.isOwned(flag)) self.allocator.free(ptr);
     }
 
-    // Bar
-    bar: BarConfig = .{},
-    // Rules
-    window_rules: ArrayListManaged(WindowRule),
-    assign_rules: ArrayListManaged(AssignRule),
-    // Exec commands
-    exec_cmds: ArrayListManaged([]const u8),
-    exec_always_cmds: ArrayListManaged([]const u8),
-    // Workspace -> output
-    workspace_outputs: ArrayListManaged(WorkspaceOutput),
-    // Mode names (known modes besides "default")
-    modes: StringHashMapManaged(void),
     pub fn parse(allocator: Allocator, text: []const u8) !Config {
         var cfg = Config{
             .allocator = allocator,

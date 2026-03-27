@@ -6,6 +6,7 @@ const tree = @import("tree.zig");
 const atoms_mod = @import("atoms.zig");
 const config_mod = @import("config.zig");
 const command_mod = @import("command.zig");
+const keysyms = @import("keysyms.zig");
 const workspace = @import("workspace.zig");
 const scratchpad = @import("scratchpad.zig");
 const criteria = @import("criteria.zig");
@@ -35,7 +36,7 @@ pub const EventContext = struct {
     current_mode: []const u8,
     focus_follows_mouse: bool,
     config: ?*const config_mod.Config,
-    key_symbols: ?*xcb.KeySymbols,
+    key_map: ?xcb.KeyMap,
     border_focus_color: u32,
     border_unfocus_color: u32,
     randr_base_event: u8 = 0,
@@ -1088,11 +1089,11 @@ fn handleDestroyNotify(ctx: *EventContext, ev: *xcb.DestroyNotifyEvent) void {
 }
 
 fn handleKeyPress(ctx: *EventContext, ev: *xcb.KeyPressEvent) void {
-    const syms = ctx.key_symbols orelse return;
+    const km = ctx.key_map orelse return;
     const cfg = ctx.config orelse return;
 
     // Get keysym from keycode
-    const keysym = xcb.keySymbolsGetKeysym(syms, ev.detail, 0);
+    const keysym = km.getKeysym(ev.detail, 0);
     if (keysym == 0) return;
 
     // Convert keysym to string for matching against config keybinds
@@ -1156,12 +1157,9 @@ fn handleKeyPress(ctx: *EventContext, ev: *xcb.KeyPressEvent) void {
     }
 }
 
-/// Convert a keysym value to its name string using xkb_keysym_get_name.
-/// buf must be at least 64 bytes. Returns null if keysym is unknown.
-fn keysymToName(keysym: xcb.Keysym, buf: *[64]u8) ?[]const u8 {
-    const n = xcb.xkb_keysym_get_name(keysym, buf, buf.len);
-    if (n <= 0) return null;
-    return buf[0..@intCast(n)];
+/// Convert a keysym value to its name string using built-in table.
+fn keysymToName(keysym: xcb.Keysym, _: *[64]u8) ?[]const u8 {
+    return keysyms.toName(keysym);
 }
 
 fn handleEnterNotify(ctx: *EventContext, ev: *xcb.EnterNotifyEvent) void {
@@ -1634,10 +1632,10 @@ fn handleFocusIn(ctx: *EventContext, ev: *xcb.FocusInEvent) void {
 
 fn handleMappingNotify(ctx: *EventContext, _: *xcb.GenericEvent) void {
     // Refresh key mappings
-    if (ctx.key_symbols) |syms| {
-        xcb.keySymbolsFree(syms);
+    if (ctx.key_map) |*km| {
+        km.deinit();
     }
-    ctx.key_symbols = xcb.keySymbolsAlloc(ctx.conn);
+    ctx.key_map = xcb.KeyMap.init(ctx.conn);
 
     // Re-grab keys
     if (ctx.config) |cfg| {
@@ -2652,7 +2650,7 @@ fn executeMode(ctx: *EventContext, cmd: command_mod.Command) void {
 // --- Key grabbing ---
 
 pub fn grabKeys(ctx: *EventContext, cfg: *const config_mod.Config) void {
-    const syms = ctx.key_symbols orelse return;
+    const km = ctx.key_map orelse return;
 
     // Ungrab all first
     _ = xcb.ungrabKey(ctx.conn, xcb.GRAB_ANY, ctx.root_window, xcb.MOD_MASK_ANY);
@@ -2665,9 +2663,7 @@ pub fn grabKeys(ctx: *EventContext, cfg: *const config_mod.Config) void {
         const keysym = nameToKeysym(kb.key);
         if (keysym == 0) continue;
 
-        const keycode_ptr = xcb.keySymbolsGetKeycode(syms, keysym) orelse continue;
-        defer std.c.free(keycode_ptr);
-        const keycode = keycode_ptr.*;
+        const keycode = km.getKeycode(keysym) orelse continue;
         if (keycode == 0) continue;
 
         // Convert modifier bitmask to X11 modifiers
@@ -2686,16 +2682,9 @@ pub fn grabKeys(ctx: *EventContext, cfg: *const config_mod.Config) void {
 
 }
 
-/// Convert a key name string to an X11 keysym using xkb_keysym_from_name.
-/// Returns 0 (XKB_KEY_NoSymbol) if not found.
+/// Convert a key name string to an X11 keysym using built-in table.
+/// Returns 0 (NoSymbol) if not found.
 fn nameToKeysym(name: []const u8) xcb.Keysym {
-    // xkb_keysym_from_name requires a null-terminated string.
-    var buf: [128]u8 = undefined;
-    if (name.len >= buf.len) return 0;
-    @memcpy(buf[0..name.len], name);
-    buf[name.len] = 0;
-    const ks = xcb.xkb_keysym_from_name(@ptrCast(&buf), xcb.XKB_KEYSYM_NO_FLAGS);
-    // XKB_KEY_NoSymbol == 0xFFFFFFFF in some headers; also 0 means not found.
-    if (ks == xcb.c.XKB_KEY_NoSymbol) return 0;
+    const ks = keysyms.fromName(name);
     return @intCast(ks);
 }

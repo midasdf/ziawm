@@ -3,17 +3,8 @@ const std = @import("std");
 
 pub const c = @cImport({
     @cInclude("xcb/xcb.h");
-    @cInclude("xcb/xcb_keysyms.h");
     @cInclude("xcb/randr.h");
-    @cInclude("xcb/xkb.h");
-    @cInclude("xkbcommon/xkbcommon.h");
 });
-
-// --- xkbcommon wrappers ---
-pub const xkb_keysym_from_name = c.xkb_keysym_from_name;
-pub const xkb_keysym_get_name = c.xkb_keysym_get_name;
-pub const XKB_KEYSYM_NO_FLAGS = c.XKB_KEYSYM_NO_FLAGS;
-pub const XKB_KEYSYM_CASE_INSENSITIVE = c.XKB_KEYSYM_CASE_INSENSITIVE;
 
 // --- Core types ---
 pub const Connection = c.xcb_connection_t;
@@ -30,7 +21,7 @@ pub const GenericError = c.xcb_generic_error_t;
 pub const Screen = c.xcb_screen_t;
 pub const Setup = c.xcb_setup_t;
 pub const ScreenIterator = c.xcb_screen_iterator_t;
-pub const KeySymbols = c.xcb_key_symbols_t;
+// KeySymbols removed — replaced by KeyMap (pure Zig, no libxcb-keysyms)
 pub const InternAtomCookie = c.xcb_intern_atom_cookie_t;
 pub const InternAtomReply = c.xcb_intern_atom_reply_t;
 pub const GetPropertyCookie = c.xcb_get_property_cookie_t;
@@ -316,6 +307,23 @@ pub fn internAtomReply(conn: *Connection, cookie: InternAtomCookie, err: ?*?*Gen
     return c.xcb_intern_atom_reply(conn, cookie, err);
 }
 
+// --- Cursor ---
+pub fn openFont(conn: *Connection, fid: u32, name: [*]const u8, name_len: u16) VoidCookie {
+    return c.xcb_open_font(conn, fid, name_len, name);
+}
+
+pub fn createGlyphCursor(conn: *Connection, cid: u32, source_font: u32, mask_font: u32, source_char: u16, mask_char: u16, fore_red: u16, fore_green: u16, fore_blue: u16, back_red: u16, back_green: u16, back_blue: u16) VoidCookie {
+    return c.xcb_create_glyph_cursor(conn, cid, source_font, mask_font, source_char, mask_char, fore_red, fore_green, fore_blue, back_red, back_green, back_blue);
+}
+
+pub fn closeFont(conn: *Connection, font: u32) VoidCookie {
+    return c.xcb_close_font(conn, font);
+}
+
+pub fn freeCursor(conn: *Connection, cursor: u32) VoidCookie {
+    return c.xcb_free_cursor(conn, cursor);
+}
+
 // --- Key grabbing ---
 pub fn grabKey(conn: *Connection, owner_events: u8, grab_window: Window, modifiers: u16, key: Keycode, pointer_mode: u8, keyboard_mode: u8) VoidCookie {
     return c.xcb_grab_key(conn, owner_events, grab_window, modifiers, key, pointer_mode, keyboard_mode);
@@ -334,22 +342,67 @@ pub fn ungrabButton(conn: *Connection, button: u8, grab_window: Window, modifier
     return c.xcb_ungrab_button(conn, button, grab_window, modifiers);
 }
 
-// --- Key symbols ---
-pub fn keySymbolsAlloc(conn: *Connection) ?*KeySymbols {
-    return c.xcb_key_symbols_alloc(conn);
-}
+// --- Key mapping (replaces libxcb-keysyms) ---
+pub const KeyMap = struct {
+    reply: *c.xcb_get_keyboard_mapping_reply_t,
+    min_keycode: Keycode,
+    max_keycode: Keycode,
+    keysyms_per_keycode: u8,
 
-pub fn keySymbolsFree(syms: *KeySymbols) void {
-    c.xcb_key_symbols_free(syms);
-}
+    pub fn init(conn: *Connection) ?KeyMap {
+        const setup = c.xcb_get_setup(conn);
+        const min_kc = setup.*.min_keycode;
+        const max_kc = setup.*.max_keycode;
+        const count = max_kc - min_kc + 1;
+        const cookie = c.xcb_get_keyboard_mapping(conn, min_kc, count);
+        const reply = c.xcb_get_keyboard_mapping_reply(conn, cookie, null) orelse return null;
+        return .{
+            .reply = reply,
+            .min_keycode = min_kc,
+            .max_keycode = max_kc,
+            .keysyms_per_keycode = reply.*.keysyms_per_keycode,
+        };
+    }
 
-pub fn keySymbolsGetKeysym(syms: *KeySymbols, keycode: Keycode, col: c_int) Keysym {
-    return c.xcb_key_symbols_get_keysym(syms, keycode, col);
-}
+    pub fn deinit(self: *KeyMap) void {
+        std.c.free(self.reply);
+        self.* = undefined;
+    }
 
-pub fn keySymbolsGetKeycode(syms: *KeySymbols, keysym: Keysym) ?*Keycode {
-    return c.xcb_key_symbols_get_keycode(syms, keysym);
-}
+    fn keysymData(self: *const KeyMap) []const Keysym {
+        const total: usize = @as(usize, self.max_keycode - self.min_keycode + 1) * self.keysyms_per_keycode;
+        const ptr: [*]const Keysym = @ptrCast(@alignCast(
+            @as([*]const u8, @ptrCast(self.reply)) + @sizeOf(c.xcb_get_keyboard_mapping_reply_t),
+        ));
+        return ptr[0..total];
+    }
+
+    pub fn getKeysym(self: *const KeyMap, keycode: Keycode, col: u8) Keysym {
+        if (keycode < self.min_keycode or keycode > self.max_keycode) return 0;
+        if (col >= self.keysyms_per_keycode) return 0;
+        const idx: usize = @as(usize, keycode - self.min_keycode) * self.keysyms_per_keycode + col;
+        const data = self.keysymData();
+        if (idx >= data.len) return 0;
+        return data[idx];
+    }
+
+    /// Find the first keycode that produces the given keysym (any column).
+    pub fn getKeycode(self: *const KeyMap, keysym: Keysym) ?Keycode {
+        const data = self.keysymData();
+        var kc: usize = 0;
+        const count: usize = @as(usize, self.max_keycode - self.min_keycode) + 1;
+        while (kc < count) : (kc += 1) {
+            const base = kc * self.keysyms_per_keycode;
+            var col: usize = 0;
+            while (col < self.keysyms_per_keycode) : (col += 1) {
+                if (data[base + col] == keysym) {
+                    return @intCast(kc + self.min_keycode);
+                }
+            }
+        }
+        return null;
+    }
+};
 
 // --- RandR ---
 pub fn randrGetScreenResources(conn: *Connection, window: Window) RandrGetScreenResourcesCookie {

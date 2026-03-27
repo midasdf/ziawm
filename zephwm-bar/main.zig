@@ -1,29 +1,26 @@
 // zephwm-bar — status bar for zephwm
-// Renders workspace buttons + status text using XCB + Xft
-// Supports per-output bars: one bar window per monitor output.
+// Renders workspace buttons + status text using XCB core fonts only.
+// No Xft/fontconfig/freetype — saves ~12 MB RSS.
 const std = @import("std");
 const ipc = @import("ipc");
 const builtin_status = @import("builtin_status");
 
 const c = @cImport({
     @cInclude("xcb/xcb.h");
-    @cInclude("X11/Xlib.h");
-    @cInclude("X11/Xlib-xcb.h");
-    @cInclude("X11/Xft/Xft.h");
 });
 
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
 const VERSION = "0.1.0";
 
-// Colors
+// Colors (raw pixel values — no XftColor needed)
 const BG_COLOR: u32 = 0x1a1a2e;
-const FG_COLOR_STR = "#dddddd";
+const FG_COLOR: u32 = 0xdddddd;
 const FOCUSED_BG: u32 = 0x4a6fa5;
-const FOCUSED_FG_STR = "#ffffff";
+const FOCUSED_FG: u32 = 0xffffff;
 const URGENT_BG: u32 = 0x900000;
-const UNFOCUSED_FG_STR = "#606060";
-const SEPARATOR_COLOR_STR = "#505060";
+const UNFOCUSED_FG: u32 = 0x606060;
+const SEPARATOR_COLOR: u32 = 0x505060;
 
 const MAX_OUTPUTS = 8;
 const MaxWorkspaces = 16;
@@ -32,7 +29,6 @@ const BarWindow = struct {
     output_name: [64]u8 = undefined,
     output_name_len: u8 = 0,
     window_id: u32 = 0,
-    draw: ?*c.XftDraw = null,
     x: i16 = 0,
     width: u16 = 0,
     output_y: i16 = 0,
@@ -125,10 +121,14 @@ fn queryBarConfig(allocator: std.mem.Allocator, sock_path: []const u8) BarConfig
     return cfg;
 }
 
+const is_debug = @import("builtin").mode == .Debug;
+var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .{};
+
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = if (is_debug) gpa_state.allocator() else std.heap.c_allocator;
+    defer if (is_debug) {
+        _ = gpa_state.deinit();
+    };
 
     // Parse args
     var args = std.process.args();
@@ -151,26 +151,29 @@ pub fn main() !void {
         }
     }
 
-    // 1. Open Xlib display (needed for Xft)
-    const dpy = c.XOpenDisplay(null) orelse {
-        std.debug.print("zephwm-bar: cannot open display\n", .{});
+    // 1. Connect to X server via XCB (no Xlib/Xft)
+    var screen_num: c_int = 0;
+    const conn = c.xcb_connect(null, &screen_num) orelse {
+        std.debug.print("zephwm-bar: cannot connect to X server\n", .{});
         return;
     };
-    defer _ = c.XCloseDisplay(dpy);
+    defer c.xcb_disconnect(conn);
 
-    const screen_num = c.XDefaultScreen(dpy);
-    const root = c.XRootWindow(dpy, screen_num);
-    const visual = c.XDefaultVisual(dpy, screen_num);
-    const colormap = c.XDefaultColormap(dpy, screen_num);
-    const screen_width: u16 = @intCast(c.XDisplayWidth(dpy, screen_num));
-    const screen_height: u16 = @intCast(c.XDisplayHeight(dpy, screen_num));
-    const visual_id: u32 = @intCast(visual.*.visualid);
+    if (c.xcb_connection_has_error(conn) != 0) {
+        std.debug.print("zephwm-bar: X connection error\n", .{});
+        return;
+    }
 
-    // Get XCB connection from Xlib
-    const conn = c.XGetXCBConnection(dpy) orelse {
-        std.debug.print("zephwm-bar: cannot get XCB connection\n", .{});
+    const setup = c.xcb_get_setup(conn);
+    const iter = c.xcb_setup_roots_iterator(setup);
+    const screen = if (iter.rem > 0) iter.data else {
+        std.debug.print("zephwm-bar: no screen\n", .{});
         return;
     };
+    const root: u32 = screen.*.root;
+    const visual_id: u32 = screen.*.root_visual;
+    const screen_width: u16 = screen.*.width_in_pixels;
+    const screen_height: u16 = screen.*.height_in_pixels;
 
     // 2. Discover IPC socket (needed before output discovery)
     var default_path_buf: [256]u8 = undefined;
@@ -268,46 +271,50 @@ pub fn main() !void {
     }
 
     _ = c.xcb_flush(conn);
-    _ = c.XSync(dpy, 0);
 
-    // 4. Init Xft
-    var font_z_buf: [257]u8 = undefined;
-    const font_z = bar_cfg.getFontZ(&font_z_buf);
-    const font = c.XftFontOpenName(dpy, screen_num, font_z) orelse {
-        std.debug.print("zephwm-bar: cannot open font '{s}'\n", .{bar_cfg.font[0..bar_cfg.font_len]});
-        return;
+    // 4. Init XCB core font (server-side, no Xft/fontconfig/freetype)
+    const font_id = c.xcb_generate_id(conn);
+    var font_opened = false;
+    const font_names = [_]struct { name: [*]const u8, len: u16 }{
+        .{ .name = "fixed", .len = 5 },
+        .{ .name = "-misc-fixed-medium-r-semicondensed--13-120-75-75-c-60-iso10646-1", .len = 64 },
+        .{ .name = "-misc-fixed-medium-r-normal--14-130-75-75-c-70-iso10646-1", .len = 57 },
+        .{ .name = "cursor", .len = 6 },
     };
-    defer c.XftFontClose(dpy, font);
-
-    // Create XftDraw per bar window
-    for (bars[0..bar_count]) |*bar| {
-        bar.draw = c.XftDrawCreate(dpy, bar.window_id, visual, colormap);
-        if (bar.draw == null) {
-            std.debug.print("zephwm-bar: cannot create XftDraw for output {s}\n", .{bar.getOutputName()});
+    for (font_names) |f| {
+        const cookie = c.xcb_open_font_checked(conn, font_id, f.len, f.name);
+        if (c.xcb_request_check(conn, cookie) == null) {
+            font_opened = true;
+            break;
         }
     }
-    defer {
-        for (bars[0..bar_count]) |*bar| {
-            if (bar.draw) |d| c.XftDrawDestroy(d);
+    if (!font_opened) {
+        std.debug.print("zephwm-bar: cannot open any font\n", .{});
+        return;
+    }
+    defer _ = c.xcb_close_font(conn, font_id);
+
+    // Query font metrics
+    var font_ascent: u16 = 10;
+    var font_descent: u16 = 2;
+    var font_char_width: u16 = 6;
+    {
+        const qf_cookie = c.xcb_query_font(conn, font_id);
+        if (c.xcb_query_font_reply(conn, qf_cookie, null)) |reply| {
+            font_ascent = @intCast(reply.*.font_ascent);
+            font_descent = @intCast(reply.*.font_descent);
+            if (reply.*.max_bounds.character_width > 0)
+                font_char_width = @intCast(reply.*.max_bounds.character_width);
+            std.c.free(reply);
         }
     }
 
-    // Pre-allocate colors
-    var fg_color: c.XftColor = undefined;
-    var focused_fg: c.XftColor = undefined;
-    var unfocused_fg: c.XftColor = undefined;
-    _ = c.XftColorAllocName(dpy, visual, colormap, FG_COLOR_STR, &fg_color);
-    _ = c.XftColorAllocName(dpy, visual, colormap, FOCUSED_FG_STR, &focused_fg);
-    _ = c.XftColorAllocName(dpy, visual, colormap, UNFOCUSED_FG_STR, &unfocused_fg);
-    defer c.XftColorFree(dpy, visual, colormap, &fg_color);
-    defer c.XftColorFree(dpy, visual, colormap, &focused_fg);
-    defer c.XftColorFree(dpy, visual, colormap, &unfocused_fg);
-
-    // 5. Create GC for filling rectangles (shared across all bar windows, using first bar)
+    // 5. Create GC with font (shared across all bar windows)
     const gc = c.xcb_generate_id(conn);
     {
-        const gc_values = [_]u32{ BG_COLOR, 0 };
-        _ = c.xcb_create_gc(conn, gc, bars[0].window_id, c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES, &gc_values);
+        const gc_values = [_]u32{ FG_COLOR, BG_COLOR, font_id, 0 };
+        _ = c.xcb_create_gc(conn, gc, bars[0].window_id,
+            c.XCB_GC_FOREGROUND | c.XCB_GC_BACKGROUND | c.XCB_GC_FONT | c.XCB_GC_GRAPHICS_EXPOSURES, &gc_values);
     }
     defer _ = c.xcb_free_gc(conn, gc);
 
@@ -381,7 +388,7 @@ pub fn main() !void {
     // Initial refresh + draw
     refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, &ws_count);
     for (bars[0..bar_count]) |*bar| {
-        drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, &focused_fg, &unfocused_fg, &fg_color, bar_height, ws_button_pad, status_pad, separator_pad);
+        drawBar(conn, bar, gc, font_ascent, font_char_width, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, bar_height, ws_button_pad, status_pad, separator_pad);
     }
 
     while (running) {
@@ -397,7 +404,6 @@ pub fn main() !void {
         }
 
         // Process X events
-        _ = c.XSync(dpy, 0);
         while (c.xcb_poll_for_event(conn)) |ev| {
             const response_type = ev.*.response_type & 0x7f;
             switch (response_type) {
@@ -406,7 +412,7 @@ pub fn main() !void {
                     // Find which bar window was exposed and redraw it
                     for (bars[0..bar_count]) |*bar| {
                         if (bar.window_id == expose_ev.window) {
-                            drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, &focused_fg, &unfocused_fg, &fg_color, bar_height, ws_button_pad, status_pad, separator_pad);
+                            drawBar(conn, bar, gc, font_ascent, font_char_width, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, bar_height, ws_button_pad, status_pad, separator_pad);
                             break;
                         }
                     }
@@ -416,7 +422,7 @@ pub fn main() !void {
                     // Find which bar window was clicked
                     for (bars[0..bar_count]) |*bar| {
                         if (bar.window_id == bev.event) {
-                            handleClick(allocator, sock_path, bev.event_x, bev.detail, bev.event_y, bar, &ws_names, &ws_name_lens, &ws_outputs, &ws_output_lens, ws_count, font, dpy, &status_blocks, status_block_count, click_events_enabled, status_stdin_fd, bar_height, ws_button_pad);
+                            handleClick(allocator, sock_path, bev.event_x, bev.detail, bev.event_y, bar, &ws_names, &ws_name_lens, &ws_outputs, &ws_output_lens, ws_count, font_char_width, &status_blocks, status_block_count, click_events_enabled, status_stdin_fd, bar_height, ws_button_pad);
                             break;
                         }
                     }
@@ -470,7 +476,7 @@ pub fn main() !void {
         refreshWorkspaces(allocator, sock_path, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, &ws_count);
         // Redraw all bars (workspace refresh always triggers redraw)
         for (bars[0..bar_count]) |*bar| {
-            drawBar(conn, dpy, bar, font, gc, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, &focused_fg, &unfocused_fg, &fg_color, bar_height, ws_button_pad, status_pad, separator_pad);
+            drawBar(conn, bar, gc, font_ascent, font_char_width, &ws_names, &ws_name_lens, &ws_focused, &ws_urgent, &ws_outputs, &ws_output_lens, ws_count, &status_blocks, status_block_count, bar_height, ws_button_pad, status_pad, separator_pad);
         }
     }
 
@@ -563,25 +569,13 @@ fn findNumEnd(data: []const u8, start: usize) usize {
     return i;
 }
 
-/// Convert a packed 0xRRGGBB u32 to XftColor without a server round-trip.
-fn xftColorFromU32(pixel: u32) c.XftColor {
-    return .{
-        .pixel = pixel,
-        .color = .{
-            .red = @as(u16, @intCast((pixel >> 16) & 0xFF)) * 257,
-            .green = @as(u16, @intCast((pixel >> 8) & 0xFF)) * 257,
-            .blue = @as(u16, @intCast(pixel & 0xFF)) * 257,
-            .alpha = 0xFFFF,
-        },
-    };
-}
 
 fn drawBar(
     conn: *c.xcb_connection_t,
-    dpy: *c.Display,
     bar: *BarWindow,
-    font: *c.XftFont,
     gc: u32,
+    font_ascent: u16,
+    font_char_width: u16,
     ws_names: *[MaxWorkspaces][32]u8,
     ws_name_lens: *[MaxWorkspaces]u8,
     ws_focused: *[MaxWorkspaces]bool,
@@ -591,15 +585,11 @@ fn drawBar(
     ws_count: usize,
     status_blocks: *[MAX_STATUS_BLOCKS]StatusBlock,
     status_block_count: usize,
-    focused_fg: *c.XftColor,
-    unfocused_fg: *c.XftColor,
-    fg_color: *c.XftColor,
     bar_height: u16,
     ws_button_pad: u16,
     status_pad: u16,
     separator_pad: u16,
 ) void {
-    const draw = bar.draw orelse return;
     const bar_win = bar.window_id;
     const bar_width = bar.width;
     const bar_output = bar.getOutputName();
@@ -610,16 +600,14 @@ fn drawBar(
     const rect = [_]c.xcb_rectangle_t{.{ .x = 0, .y = 0, .width = bar_width, .height = bar_height }};
     _ = c.xcb_poly_fill_rectangle(conn, bar_win, gc, 1, &rect);
 
-    const text_y: c_int = @divTrunc((@as(c_int, bar_height) - (font.*.ascent + font.*.descent)), 2) + font.*.ascent;
+    const text_y: i16 = @intCast(@divTrunc(bar_height, 2) + @divTrunc(font_ascent, 2));
     var x: u16 = 0;
 
-    // Draw workspace buttons — only workspaces belonging to this output
+    // Draw workspace buttons
     for (0..ws_count) |i| {
         const name_len = ws_name_lens[i];
         if (name_len == 0) continue;
 
-        // Filter by output: show workspace only if it belongs to this bar's output
-        // Empty bar_output (len=0) matches all outputs (fallback single-screen mode)
         if (bar_output.len > 0) {
             const ws_out_len = ws_output_lens[i];
             if (ws_out_len > 0) {
@@ -629,13 +617,9 @@ fn drawBar(
         }
 
         const name = ws_names[i][0..name_len];
+        const btn_w: u16 = @intCast(@as(u32, @intCast(name.len)) * font_char_width + ws_button_pad * 2);
 
-        // Calculate button width from text
-        var extents: c.XGlyphInfo = undefined;
-        c.XftTextExtentsUtf8(dpy, font, name.ptr, @intCast(name.len), &extents);
-        const btn_w: u16 = @intCast(@as(u32, @intCast(extents.xOff)) + ws_button_pad * 2);
-
-        // Draw background for focused/urgent workspaces
+        // Draw background for focused/urgent
         if (ws_focused[i] or ws_urgent[i]) {
             const bg = if (ws_urgent[i]) URGENT_BG else FOCUSED_BG;
             const bg_val = [_]u32{bg};
@@ -645,26 +629,20 @@ fn drawBar(
         }
 
         // Draw text
-        _ = c.XSync(dpy, 0);
-        const color = if (ws_focused[i]) focused_fg else if (ws_urgent[i]) focused_fg else unfocused_fg;
-        c.XftDrawStringUtf8(draw, color, font, @intCast(x + ws_button_pad), text_y, name.ptr, @intCast(name.len));
+        const fg = if (ws_focused[i] or ws_urgent[i]) FOCUSED_FG else UNFOCUSED_FG;
+        const fg_val = [_]u32{fg};
+        _ = c.xcb_change_gc(conn, gc, c.XCB_GC_FOREGROUND, &fg_val);
+        const tlen: u8 = @intCast(@min(name.len, 255));
+        _ = c.xcb_image_text_8(conn, tlen, bar_win, gc, @intCast(x + ws_button_pad), text_y, name.ptr);
 
         x += btn_w;
     }
 
     // Draw status blocks (right-to-left)
     if (status_block_count > 0) {
-        const sep_str = "|";
-        var sep_extents: c.XGlyphInfo = undefined;
-        c.XftTextExtentsUtf8(dpy, font, sep_str.ptr, 1, &sep_extents);
-        const sep_w: u16 = @intCast(sep_extents.xOff);
-        const sep_total_w: u16 = sep_w + separator_pad * 2;
-        var separator_color = xftColorFromU32(0x505060);
-
+        const sep_total_w: u16 = font_char_width + separator_pad * 2;
         var status_x: u16 = bar_width;
-        // Iterate blocks in reverse (rightmost first)
         var bi: usize = status_block_count;
-        // Track whether we've drawn at least one visible block (to decide if separator is needed)
         var drawn_count: usize = 0;
         while (bi > 0) {
             bi -= 1;
@@ -672,43 +650,37 @@ fn drawBar(
             if (blk.full_text_len == 0) continue;
 
             const ft = blk.full_text[0..blk.full_text_len];
-            var extents: c.XGlyphInfo = undefined;
-            c.XftTextExtentsUtf8(dpy, font, ft.ptr, @intCast(ft.len), &extents);
-            const text_w: u16 = @intCast(extents.xOff);
-            // Account for separator to the left of this block (all except rightmost)
+            const text_w: u16 = @intCast(@as(u32, @intCast(ft.len)) * font_char_width);
             const need_sep = drawn_count > 0;
             const sep_cost: u16 = if (need_sep) sep_total_w else 0;
             const block_w: u16 = text_w + status_pad * 2;
             const total_cost = block_w + sep_cost;
 
-            if (status_x < total_cost) break; // no room
+            if (status_x < total_cost) break;
 
-            // Draw separator first (to the left of the previous block's left edge)
+            // Draw separator
             if (need_sep) {
                 status_x -= sep_total_w;
-                c.XftDrawStringUtf8(draw, &separator_color, font, @intCast(status_x + separator_pad), text_y, sep_str.ptr, 1);
+                const sep_val = [_]u32{SEPARATOR_COLOR};
+                _ = c.xcb_change_gc(conn, gc, c.XCB_GC_FOREGROUND, &sep_val);
+                _ = c.xcb_image_text_8(conn, 1, bar_win, gc, @intCast(status_x + separator_pad), text_y, "|");
             }
 
             status_x -= block_w;
-
-            // Record render position for click detection (per-bar)
             bar.block_render_x[bi] = status_x;
             bar.block_render_w[bi] = block_w;
 
-            // Draw text with per-block color (0 = use default fg_color)
-            var text_color: c.XftColor = undefined;
-            const color_ptr: *c.XftColor = if (blk.color != 0) blk: {
-                text_color = xftColorFromU32(blk.color);
-                break :blk &text_color;
-            } else fg_color;
-            c.XftDrawStringUtf8(draw, color_ptr, font, @intCast(status_x + status_pad), text_y, ft.ptr, @intCast(ft.len));
+            // Draw text with per-block color
+            const color: u32 = if (blk.color != 0) blk.color else FG_COLOR;
+            const color_val = [_]u32{color};
+            _ = c.xcb_change_gc(conn, gc, c.XCB_GC_FOREGROUND, &color_val);
+            const tlen: u8 = @intCast(@min(ft.len, 255));
+            _ = c.xcb_image_text_8(conn, tlen, bar_win, gc, @intCast(status_x + status_pad), text_y, ft.ptr);
 
             drawn_count += 1;
         }
-        _ = &separator_color; // suppress unused warning if no blocks
     }
 
-    _ = c.XSync(dpy, 0);
     _ = c.xcb_flush(conn);
 }
 
@@ -724,8 +696,7 @@ fn handleClick(
     ws_outputs: *[MaxWorkspaces][64]u8,
     ws_output_lens: *[MaxWorkspaces]u8,
     ws_count: usize,
-    font: *c.XftFont,
-    dpy: *c.Display,
+    font_char_width: u16,
     status_blocks: *[MAX_STATUS_BLOCKS]StatusBlock,
     status_block_count: usize,
     click_events_enabled: bool,
@@ -734,13 +705,11 @@ fn handleClick(
     ws_button_pad: u16,
 ) void {
     const bar_output = bar.getOutputName();
-    // Determine which workspace button was clicked (only for this output's workspaces)
     var x: u16 = 0;
     for (0..ws_count) |i| {
         const name_len = ws_name_lens[i];
         if (name_len == 0) continue;
 
-        // Filter by output (empty bar_output matches all)
         if (bar_output.len > 0) {
             const ws_out_len = ws_output_lens[i];
             if (ws_out_len > 0) {
@@ -750,10 +719,7 @@ fn handleClick(
         }
 
         const name = ws_names[i][0..name_len];
-
-        var extents: c.XGlyphInfo = undefined;
-        c.XftTextExtentsUtf8(dpy, font, name.ptr, @intCast(name.len), &extents);
-        const btn_w: u16 = @intCast(@as(u32, @intCast(extents.xOff)) + ws_button_pad * 2);
+        const btn_w: u16 = @intCast(@as(u32, @intCast(name.len)) * font_char_width + ws_button_pad * 2);
 
         if (click_x >= @as(i16, @intCast(x)) and click_x < @as(i16, @intCast(x + btn_w))) {
             // Send workspace switch command via IPC
