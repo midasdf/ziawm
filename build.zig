@@ -3,6 +3,10 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // リリースビルド時はデバッグシンボルを除去しRSS数MB削減
+    const strip: ?bool = if (optimize != .Debug) true else null;
+    // WMは単一スレッド。TLS・mutex不要。
+    const single_threaded: ?bool = if (optimize != .Debug) true else null;
 
     // Shared modules
     const ipc_mod = b.createModule(.{
@@ -18,6 +22,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = strip,
+            .single_threaded = single_threaded,
         }),
     });
     zephwm_exe.linkSystemLibrary("xcb");
@@ -36,6 +42,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("zephwm-msg/main.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = strip,
+            .single_threaded = single_threaded,
             .imports = &.{
                 .{ .name = "ipc", .module = ipc_mod },
             },
@@ -61,6 +69,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("zephwm-bar/main.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = strip,
+            .single_threaded = single_threaded,
             .imports = &.{
                 .{ .name = "ipc", .module = ipc_mod },
                 .{ .name = "builtin_status", .module = builtin_status_mod },
